@@ -9,7 +9,7 @@ import io
 st.set_page_config(page_title="NBA PROPS & HUNTER", page_icon="🏀", layout="wide")
 
 # ─────────────────────────────────────────────
-# PROCESAMIENTO DE DATOS
+# PROCESAMIENTO DE DATOS (NUEVO: CONCATENACIÓN MASIVA)
 # ─────────────────────────────────────────────
 def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = df.columns.str.strip().str.lower().str.replace(r"[\s\-/]", "_", regex=True).str.replace(r"[^a-z0-9_]", "", regex=True)
@@ -23,23 +23,66 @@ def _col(df: pd.DataFrame, candidates: list) -> str | None:
 
 @st.cache_data(show_spinner=False)
 def load_data(files_bytes: dict) -> dict:
+    """
+    Lee múltiples archivos y los agrupa por categoría. 
+    Si subes 5 Excels de 'players', los fusiona en un solo DataFrame gigante.
+    """
     frames = {}
-    for key, (name, raw) in files_bytes.items():
-        try:
-            df = None
-            if name.lower().endswith((".xlsx", ".xls")):
-                df = pd.read_excel(io.BytesIO(raw))
-            else:
-                for enc in ("utf-8", "latin-1", "cp1252"):
-                    try:
-                        df = pd.read_csv(io.BytesIO(raw), encoding=enc)
-                        break
-                    except Exception:
-                        continue
-            
-            if df is not None:
-                frames[key] = _normalize_cols(df)
-        except Exception:
+    temp_dict = {
+        "roster": [],
+        "nbaleaguesumary": [],
+        "def": [],
+        "players": [],
+        "impact": [],
+        "trends": []
+    }
+    
+    # Palabras clave de búsqueda
+    keys_dict = {
+        "roster": ["roster", "plantilla"],
+        "nbaleaguesumary": ["summary", "league", "resumen"],
+        "def": ["def", "defense", "dvp"],
+        "players": ["players", "jugadores"],
+        "impact": ["impact", "impacto", "onoff"],
+        "trends": ["trends", "tendencias", "trend"]
+    }
+
+    # 1. Leer cada archivo y meterlo en su categoría correspondiente
+    for _, (name, raw) in files_bytes.items():
+        fname = name.lower()
+        matched_category = None
+        
+        for main_key, aliases in keys_dict.items():
+            if any(alias in fname for alias in aliases):
+                matched_category = main_key
+                break
+                
+        if matched_category:
+            try:
+                df = None
+                if fname.endswith((".xlsx", ".xls")):
+                    df = pd.read_excel(io.BytesIO(raw))
+                else:
+                    for enc in ("utf-8", "latin-1", "cp1252"):
+                        try:
+                            df = pd.read_csv(io.BytesIO(raw), encoding=enc)
+                            break
+                        except Exception:
+                            continue
+                
+                if df is not None:
+                    temp_dict[matched_category].append(_normalize_cols(df))
+            except Exception:
+                pass
+
+    # 2. Fusionar todos los archivos de cada categoría
+    for key, df_list in temp_dict.items():
+        if df_list:
+            try:
+                frames[key] = pd.concat(df_list, ignore_index=True)
+            except Exception:
+                frames[key] = pd.DataFrame()
+        else:
             frames[key] = pd.DataFrame()
             
     return frames
@@ -293,26 +336,17 @@ with st.sidebar:
     uploaded = st.file_uploader("Sube archivos CTG", accept_multiple_files=True, type=["csv", "xlsx"])
     fmap = {}
     if uploaded:
-        keys_dict = {
-            "roster": ["roster", "plantilla"],
-            "nbaleaguesumary": ["summary", "league", "resumen"],
-            "def": ["def", "defense", "dvp"],
-            "players": ["players", "jugadores"],
-            "impact": ["impact", "impacto", "onoff"],
-            "trends": ["trends", "tendencias", "trend"]
-        }
-        for f in uploaded:
-            fname = f.name.lower()
-            for main_key, aliases in keys_dict.items():
-                if any(alias in fname for alias in aliases) and main_key not in fmap:
-                    fmap[main_key] = f
-                    break
+        frames = load_data({str(i): (v.name, v.read()) for i, v in enumerate(uploaded)})
+        st.success("¡Base de Datos Fusionada!")
+        st.write(f"📂 Archivos Subidos: {len(uploaded)}")
         
-        st.success(f"Archivos listos: {len(fmap)}")
-        for k in fmap.keys():
-            st.write(f"✅ {k.upper()}")
-            
-        frames = load_data({k: (v.name, v.read()) for k, v in fmap.items()})
+        # Mostrar qué categorías se lograron llenar
+        st.caption("Estado de las Tablas:")
+        for k, v in frames.items():
+            if not v.empty:
+                st.write(f"✅ {k.upper()} ({len(v)} filas)")
+            else:
+                st.write(f"❌ {k.upper()} (Vacío)")
     else:
         frames = {}
 
@@ -401,6 +435,6 @@ with tab2:
     if st.button(f"Generar Matriz {t_target}", type="primary"):
         df_props = generate_roster_matrix(t_target, t_opp, frames, current_out)
         if df_props.empty:
-            st.warning("No hay datos suficientes.")
+            st.warning("No hay datos suficientes para proyectar a este equipo. Revisa el archivo Players y Roster.")
         else:
             st.dataframe(df_props, use_container_width=True, hide_index=True)
