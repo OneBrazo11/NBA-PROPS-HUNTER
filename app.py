@@ -4,12 +4,12 @@ import numpy as np
 import io
 
 # ─────────────────────────────────────────────
-# PAGE CONFIG (MODO SEGURO - SIN CSS)
+# CONFIGURACIÓN DE PÁGINA
 # ─────────────────────────────────────────────
 st.set_page_config(page_title="NBA PROPS & HUNTER", page_icon="🏀", layout="wide")
 
 # ─────────────────────────────────────────────
-# DATA PROCESSING
+# PROCESAMIENTO DE DATOS (FUNCIONES INTERNAS)
 # ─────────────────────────────────────────────
 def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = df.columns.str.strip().str.lower().str.replace(r"[\s\-/]", "_", regex=True).str.replace(r"[^a-z0-9_]", "", regex=True)
@@ -45,7 +45,7 @@ def load_data(files_bytes: dict) -> dict:
     return frames
 
 # ─────────────────────────────────────────────
-# INJURY IMPACT ENGINE
+# MOTOR DE IMPACTO DE LESIONES
 # ─────────────────────────────────────────────
 def calculate_absence_impact(team_name: str, out_players: list, impact_df: pd.DataFrame) -> float:
     total_impact = 0.0
@@ -65,7 +65,7 @@ def calculate_absence_impact(team_name: str, out_players: list, impact_df: pd.Da
     return total_impact
 
 # ─────────────────────────────────────────────
-# GAME HUNTER LOGIC
+# LÓGICA DE GAME HUNTER
 # ─────────────────────────────────────────────
 def _team_momentum(summary_df: pd.DataFrame, team: str) -> dict:
     res = {"offrtg": np.nan, "defrtg": np.nan, "pace": np.nan}
@@ -106,7 +106,7 @@ def project_game(home: str, away: str, frames: dict, h_impact: float, a_impact: 
     avg_pace = np.nanmean([hm["pace"], am["pace"]])
     pace = avg_pace if not np.isnan(avg_pace) else 98.5
     
-    # Ajustar Ratings por lesiones
+    # Ajustar Ratings por lesiones (CORRECCIÓN DE VARIABLE DEFRTG)
     h_ortg_adj = hm["offrtg"] + (h_impact / 2) if not np.isnan(hm["offrtg"]) else np.nan
     h_drtg_adj = hm["defrtg"] - (h_impact / 2) if not np.isnan(hm["defrtg"]) else np.nan
     
@@ -138,93 +138,6 @@ def project_game(home: str, away: str, frames: dict, h_impact: float, a_impact: 
     }
 
 # ─────────────────────────────────────────────
-# PROP ASSASSIN LOGIC
+# LÓGICA DE PROP ASSASSIN
 # ─────────────────────────────────────────────
-def _player_metrics(pdf: pd.DataFrame, idf: pd.DataFrame, player: str) -> dict:
-    res = {"pts": np.nan, "reb": np.nan, "ast": np.nan, "usg": np.nan, "min": np.nan}
-    if pdf.empty:
-        return res
-    
-    nc = _col(pdf, ["player", "name"])
-    if nc:
-        mask = pdf[nc].astype(str).str.lower().str.contains(player.lower(), na=False)
-        p1 = pdf[mask].copy()
-        sc = _col(p1, ["split", "games"])
-        if sc:
-            l10 = p1[p1[sc].astype(str).str.lower().str.contains("l10|last", regex=True, na=False)]
-            if not l10.empty:
-                p1 = l10
-        
-        c_pts = _col(p1, ["pts", "points"])
-        c_reb = _col(p1, ["reb", "trb"])
-        c_ast = _col(p1, ["ast", "assists"])
-        
-        if c_pts:
-            res["pts"] = pd.to_numeric(p1[c_pts], errors="coerce").mean()
-        if c_reb:
-            res["reb"] = pd.to_numeric(p1[c_reb], errors="coerce").mean()
-        if c_ast:
-            res["ast"] = pd.to_numeric(p1[c_ast], errors="coerce").mean()
-
-    if not idf.empty:
-        nic = _col(idf, ["player", "name"])
-        if nic:
-            imask = idf[nic].astype(str).str.lower().str.contains(player.lower(), na=False)
-            i1 = idf[imask]
-            c_usg = _col(i1, ["usg", "usage"])
-            c_min = _col(i1, ["min", "minutes"])
-            
-            if c_usg:
-                res["usg"] = pd.to_numeric(i1[c_usg], errors="coerce").mean()
-            if c_min:
-                res["min"] = pd.to_numeric(i1[c_min], errors="coerce").mean()
-            
-    return res
-
-def _dvp_factor(def_df: pd.DataFrame, opp: str, pos: str) -> float:
-    if def_df.empty:
-        return 1.0
-        
-    tc = _col(def_df, ["team", "opp", "opponent", "tm"])
-    pc = _col(def_df, ["pos", "position"])
-    
-    if not tc:
-        return 1.0
-        
-    t_df = def_df[def_df[tc].astype(str).str.lower().str.contains(opp.lower(), na=False)]
-    
-    if pc and not t_df.empty:
-        p_df = t_df[t_df[pc].astype(str).str.lower().str.contains(str(pos).lower()[:2], na=False)]
-        if not p_df.empty:
-            t_df = p_df
-    
-    rc = _col(t_df, ["rel", "diff", "vs_avg", "pct_diff"])
-    if rc and not t_df.empty:
-        val = pd.to_numeric(t_df[rc], errors="coerce").mean()
-        if not np.isnan(val):
-            return 1.0 + (val / 100.0)
-            
-    return 1.0
-
-def evaluate_risk(dvp: float, usg: float, mins: float) -> tuple:
-    if dvp > 1.05:
-        s_dvp, t_dvp = 3, "🟢 Favorable"
-    elif dvp < 0.95:
-        s_dvp, t_dvp = 1, "🔴 Difícil"
-    else:
-        s_dvp, t_dvp = 2, "🟡 Neutro"
-
-    s_vol, t_vol = 2, "🟡 Rotación"
-    if not np.isnan(usg):
-        if usg > 22.0:
-            s_vol, t_vol = 3, "🟢 Foco Ofensivo"
-        elif usg < 15.0:
-            s_vol, t_vol = 1, "🔴 Bajo Uso"
-    elif not np.isnan(mins):
-        if mins > 28.0:
-            s_vol, t_vol = 3, "🟢 Titular Fijo"
-        elif mins < 18.0:
-            s_vol, t_vol = 1, "🔴 Pocos Minutos"
-
-    total = s_dvp + s_vol
-    if total == 6:
+def _player_metrics(pdf: pd.
