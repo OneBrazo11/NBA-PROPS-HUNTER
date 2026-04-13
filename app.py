@@ -31,7 +31,8 @@ def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
 
 def _col(df: pd.DataFrame, candidates: list) -> str | None:
     for c in candidates:
-        if c in df.columns: return c
+        if c in df.columns:
+            return c
     return None
 
 @st.cache_data(show_spinner=False)
@@ -39,6 +40,7 @@ def load_data(files_bytes: dict) -> dict:
     frames = {}
     for key, (name, raw) in files_bytes.items():
         try:
+            df = None
             if name.lower().endswith((".xlsx", ".xls")):
                 df = pd.read_excel(io.BytesIO(raw))
             else:
@@ -46,10 +48,14 @@ def load_data(files_bytes: dict) -> dict:
                     try:
                         df = pd.read_csv(io.BytesIO(raw), encoding=enc)
                         break
-                    except Exception: continue
-            if df is not None: frames[key] = _normalize_cols(df)
+                    except Exception:
+                        continue
+            
+            if df is not None:
+                frames[key] = _normalize_cols(df)
         except Exception:
             frames[key] = pd.DataFrame()
+            
     return frames
 
 # ─────────────────────────────────────────────
@@ -57,9 +63,31 @@ def load_data(files_bytes: dict) -> dict:
 # ─────────────────────────────────────────────
 def calculate_absence_impact(team_name: str, out_players: list, impact_df: pd.DataFrame) -> float:
     total_impact = 0.0
-    if impact_df.empty or not out_players: return 0.0
+    if impact_df.empty or not out_players:
+        return 0.0
     
     p_col = _col(impact_df, ["player", "name"])
     diff_col = _col(impact_df, ["diff_pts_per_100_poss", "point_differential", "on_off_diff", "diff"])
     
     if p_col and diff_col:
+        for player in out_players:
+            val = impact_df[impact_df[p_col].astype(str).str.contains(player, na=False)][diff_col]
+            if not val.empty:
+                impact_val = pd.to_numeric(val.iloc[0], errors='coerce')
+                if not np.isnan(impact_val):
+                    total_impact -= impact_val 
+    return total_impact
+
+# ─────────────────────────────────────────────
+# GAME HUNTER LOGIC
+# ─────────────────────────────────────────────
+def _team_momentum(summary_df: pd.DataFrame, team: str) -> dict:
+    res = {"offrtg": np.nan, "defrtg": np.nan, "pace": np.nan}
+    if summary_df.empty:
+        return res
+        
+    tc = _col(summary_df, ["team", "tm", "team_name"])
+    if not tc:
+        return res
+        
+    mask = summary_df[tc].astype(str).str.lower().str.contains(team.lower(), na=False)
