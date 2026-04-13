@@ -6,13 +6,22 @@ import io
 # ─────────────────────────────────────────────
 # CONFIGURACIÓN DE PÁGINA
 # ─────────────────────────────────────────────
-st.set_page_config(page_title="NBA PROPS & HUNTER", page_icon="🏀", layout="wide")
+st.set_page_config(
+    page_title="NBA PROPS & HUNTER", 
+    page_icon="🏀", 
+    layout="wide"
+)
 
 # ─────────────────────────────────────────────
-# PROCESAMIENTO DE DATOS (CONCATENACIÓN MASIVA)
+# PROCESAMIENTO DE DATOS
 # ─────────────────────────────────────────────
 def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
-    df.columns = df.columns.str.strip().str.lower().str.replace(r"[\s\-/]", "_", regex=True).str.replace(r"[^a-z0-9_]", "", regex=True)
+    df.columns = (
+        df.columns.str.strip()
+        .str.lower()
+        .str.replace(r"[\s\-/]", "_", regex=True)
+        .str.replace(r"[^a-z0-9_]", "", regex=True)
+    )
     return df
 
 def _col(df: pd.DataFrame, candidates: list) -> str | None:
@@ -101,7 +110,7 @@ def calculate_absence_impact(team_name: str, out_players: list, impact_df: pd.Da
     return total_impact
 
 # ─────────────────────────────────────────────
-# LÓGICA DE GAME HUNTER (BLINDADA CONTRA KEYERROR)
+# LÓGICA DE GAME HUNTER 
 # ─────────────────────────────────────────────
 def _team_momentum(summary_df: pd.DataFrame, team: str) -> dict:
     res = {"offrtg": np.nan, "defrtg": np.nan, "pace": np.nan}
@@ -139,7 +148,6 @@ def project_game(home: str, away: str, frames: dict, h_impact: float, a_impact: 
     hm = _team_momentum(sdf, home)
     am = _team_momentum(sdf, away)
     
-    # USO SEGURO CON .GET() PARA EVITAR CUALQUIER KEYERROR
     h_pace = hm.get("pace", np.nan)
     a_pace = am.get("pace", np.nan)
     avg_pace = np.nanmean([h_pace, a_pace])
@@ -168,8 +176,14 @@ def project_game(home: str, away: str, frames: dict, h_impact: float, a_impact: 
     tot = h_pts + a_pts
     spread = a_pts - h_pts 
     
-    winner = home if (not np.isnan(h_pts) and not np.isnan(a_pts) and h_pts > a_pts) else away
-    win_margin = abs(h_pts - a_pts) if (not np.isnan(h_pts) and not np.isnan(a_pts)) else 0.0
+    winner = away
+    if not np.isnan(h_pts) and not np.isnan(a_pts):
+        if h_pts > a_pts:
+            winner = home
+            
+    win_margin = 0.0
+    if not np.isnan(h_pts) and not np.isnan(a_pts):
+        win_margin = abs(h_pts - a_pts)
 
     return {
         "home_pts": h_pts, 
@@ -251,23 +265,32 @@ def _dvp_factor(def_df: pd.DataFrame, opp: str, pos: str) -> float:
 
 def evaluate_risk(dvp: float, usg: float, mins: float) -> tuple:
     if dvp > 1.05:
-        s_dvp, t_dvp = 3, "🟢 Favorable"
+        s_dvp = 3
+        t_dvp = "🟢 Favorable"
     elif dvp < 0.95:
-        s_dvp, t_dvp = 1, "🔴 Difícil"
+        s_dvp = 1
+        t_dvp = "🔴 Difícil"
     else:
-        s_dvp, t_dvp = 2, "🟡 Neutro"
+        s_dvp = 2
+        t_dvp = "🟡 Neutro"
 
-    s_vol, t_vol = 2, "🟡 Rotación"
+    s_vol = 2
+    t_vol = "🟡 Rotación"
+    
     if not np.isnan(usg):
         if usg > 22.0:
-            s_vol, t_vol = 3, "🟢 Foco Ofensivo"
+            s_vol = 3
+            t_vol = "🟢 Foco Ofensivo"
         elif usg < 15.0:
-            s_vol, t_vol = 1, "🔴 Bajo Uso"
+            s_vol = 1
+            t_vol = "🔴 Bajo Uso"
     elif not np.isnan(mins):
         if mins > 28.0:
-            s_vol, t_vol = 3, "🟢 Titular Fijo"
+            s_vol = 3
+            t_vol = "🟢 Titular Fijo"
         elif mins < 18.0:
-            s_vol, t_vol = 1, "🔴 Pocos Minutos"
+            s_vol = 1
+            t_vol = "🔴 Pocos Minutos"
 
     total = s_dvp + s_vol
     if total == 6:
@@ -307,14 +330,176 @@ def generate_roster_matrix(team: str, opp: str, frames: dict, out_players: list)
             pos = "UNKN"
             
         m = _player_metrics(frames.get("players", pd.DataFrame()), frames.get("impact", pd.DataFrame()), pname)
-        if np.isnan(m.get("pts", np.nan)):
+        
+        pts_val = m.get("pts", np.nan)
+        if np.isnan(pts_val):
             continue 
+            
+        reb_val = m.get("reb", 0.0)
+        ast_val = m.get("ast", 0.0)
+        usg_val = m.get("usg", np.nan)
+        min_val = m.get("min", np.nan)
         
         dvp = _dvp_factor(frames.get("def", pd.DataFrame()), opp, pos)
-        t_dvp, t_vol, risk = evaluate_risk(dvp, m.get("usg", np.nan), m.get("min", np.nan))
+        t_dvp, t_vol, risk = evaluate_risk(dvp, usg_val, min_val)
+        
+        pts_proj = round(pts_val * dvp, 1)
+        reb_proj = round(reb_val * dvp, 1)
+        ast_proj = round(ast_val * dvp, 1)
+        pra_proj = round((pts_val + reb_val + ast_val) * dvp, 1)
         
         data.append({
             "Jugador": pname,
             "Pos": pos,
-            "PTS": round(m.get("pts", 0) * dvp, 1),
-            "REB": round(m.get("reb", 0) * dvp, 1
+            "PTS": pts_proj,
+            "REB": reb_proj,
+            "AST": ast_proj,
+            "PRA": pra_proj,
+            "1. Matchup (DVP)": t_dvp,
+            "2. Volumen": t_vol,
+            "3. RIESGO": risk
+        })
+        
+    if not data:
+        return pd.DataFrame()
+        
+    df_res = pd.DataFrame(data)
+    return df_res.sort_values(by="PTS", ascending=False)
+
+# ─────────────────────────────────────────────
+# INTERFAZ 
+# ─────────────────────────────────────────────
+with st.sidebar:
+    st.title("NBA PROPS & HUNTER")
+    uploaded = st.file_uploader(
+        "Sube archivos CTG", 
+        accept_multiple_files=True, 
+        type=["csv", "xlsx"]
+    )
+    
+    fmap = {}
+    if uploaded:
+        # Reescrito para evitar líneas largas que causan error de sintaxis
+        files_dict = {}
+        for i, file_obj in enumerate(uploaded):
+            files_dict[str(i)] = (file_obj.name, file_obj.read())
+            
+        frames = load_data(files_dict)
+        
+        st.success("¡Base de Datos Fusionada!")
+        st.write(f"📂 Archivos Subidos: {len(uploaded)}")
+        
+        st.caption("Estado de las Tablas:")
+        for k, v in frames.items():
+            if not v.empty:
+                st.write(f"✅ {k.upper()} ({len(v)} filas)")
+            else:
+                st.write(f"❌ {k.upper()} (Vacío)")
+    else:
+        frames = {}
+
+st.title("🏀 NBA PROPS & HUNTER")
+
+if not frames:
+    st.info("👈 Sube los archivos en el panel lateral para iniciar.")
+    st.stop()
+
+# Selección de Equipos
+teams_set = set()
+for key in ["roster", "nbaleaguesumary", "def"]:
+    df = frames.get(key, pd.DataFrame())
+    if df.empty:
+        continue
+        
+    tc = _col(df, ["team", "tm", "team_name", "franchise", "squad", "opp"])
+    if tc:
+        teams_set.update(df[tc].dropna().astype(str).unique().tolist())
+            
+teams = sorted([t for t in teams_set if len(t) > 1])
+if not teams:
+    teams = ["UNK - Sin equipos"]
+
+col1, col2 = st.columns(2)
+with col1:
+    t_home = st.selectbox("Local (Home)", teams)
+with col2:
+    idx = 1 if len(teams) > 1 else 0
+    t_away = st.selectbox("Visitante (Away)", teams, index=idx)
+
+# Gestión de Lesiones
+st.sidebar.divider()
+st.sidebar.subheader("🚑 Bajas / Lesiones")
+
+def get_team_roster(team: str) -> list:
+    df = frames.get("roster", pd.DataFrame())
+    if df.empty:
+        return []
+    c = _col(df, ["team", "tm"])
+    p = _col(df, ["player", "name"])
+    if c and p:
+        return df[df[c] == team][p].dropna().unique().tolist()
+    return []
+
+out_home = st.sidebar.multiselect(f"Bajas {t_home}", get_team_roster(t_home))
+out_away = st.sidebar.multiselect(f"Bajas {t_away}", get_team_roster(t_away))
+
+tab1, tab2 = st.tabs(["🎯 Game Hunter", "💥 Prop Assassin"])
+
+# ══════════════════════════════════════════════
+# TAB 1: GAME HUNTER
+# ══════════════════════════════════════════════
+with tab1:
+    st.subheader("Proyección L10 + Ajuste de Bajas")
+    
+    impact_df = frames.get("impact", pd.DataFrame())
+    h_impact = calculate_absence_impact(t_home, out_home, impact_df)
+    a_impact = calculate_absence_impact(t_away, out_away, impact_df)
+
+    if st.button("Proyectar Partido", type="primary"):
+        g = project_game(t_home, t_away, frames, h_impact, a_impact)
+        
+        if np.isnan(g.get("total", np.nan)):
+            st.error("Faltan datos en League Summary para estos equipos.")
+        else:
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.metric(
+                    label="Ganador", 
+                    value=g["winner"].upper(), 
+                    delta=f"Margin: {g['margin']:.1f}"
+                )
+            with c2:
+                st.metric(
+                    label="Total (O/U)", 
+                    value=f"{g['total']:.1f}"
+                )
+            with c3:
+                fav = t_home if g["spread"] < 0 else t_away
+                hcap = -abs(g["spread"])
+                st.metric(
+                    label="Handicap", 
+                    value=f"{fav} {hcap:.1f}"
+                )
+            
+            if out_home or out_away:
+                st.caption(f"Ajuste Lesiones: {t_home} ({h_impact:+.1f}) | {t_away} ({a_impact:+.1f})")
+
+# ══════════════════════════════════════════════
+# TAB 2: PROP ASSASSIN
+# ══════════════════════════════════════════════
+with tab2:
+    st.subheader("Matriz de Comando Única")
+    t_target = st.radio("Analizar:", [t_home, t_away], horizontal=True)
+    t_opp = t_away if t_target == t_home else t_home
+    current_out = out_home if t_target == t_home else out_away
+    
+    if st.button(f"Generar Matriz {t_target}", type="primary"):
+        df_props = generate_roster_matrix(t_target, t_opp, frames, current_out)
+        if df_props.empty:
+            st.warning("No hay datos suficientes para proyectar a este equipo.")
+        else:
+            st.dataframe(
+                df_props, 
+                use_container_width=True, 
+                hide_index=True
+            )
