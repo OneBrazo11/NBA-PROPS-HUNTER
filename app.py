@@ -37,6 +37,7 @@ def load_data(files_bytes: dict) -> dict:
                 df = pd.read_excel(io.BytesIO(raw)) if fname.endswith((".xlsx", ".xls")) else pd.read_csv(io.BytesIO(raw), encoding="latin-1")
                 temp_dict[match].append(_normalize_cols(df))
             except: pass
+            
     for k, v in temp_dict.items():
         frames[k] = pd.concat(v, ignore_index=True) if v else pd.DataFrame()
     return frames
@@ -73,7 +74,8 @@ def _team_momentum(sdf: pd.DataFrame, team: str) -> dict:
     if dc: res["defrtg"] = pd.to_numeric(tdf[dc], errors="coerce").mean()
     if pc: res["pace"] = pd.to_numeric(tdf[pc], errors="coerce").mean()
     return res
-    def project_game(home: str, away: str, frames: dict, h_imp: float, a_imp: float) -> dict:
+
+def project_game(home: str, away: str, frames: dict, h_imp: float, a_imp: float) -> dict:
     hm = _team_momentum(frames.get("nbaleaguesumary", pd.DataFrame()), home)
     am = _team_momentum(frames.get("nbaleaguesumary", pd.DataFrame()), away)
     pace = np.nanmean([hm.get("pace", np.nan), am.get("pace", np.nan)])
@@ -108,15 +110,21 @@ def _player_metrics(pdf: pd.DataFrame, idf: pd.DataFrame, player: str) -> dict:
         sc = _col(p1, ["split", "games"])
         if sc and not p1[p1[sc].astype(str).str.lower().str.contains("l10|last", regex=True, na=False)].empty:
             p1 = p1[p1[sc].astype(str).str.lower().str.contains("l10|last", regex=True, na=False)]
-        c_pts, c_reb, c_ast = _col(p1, ["pts", "points", "pt"]), _col(p1, ["reb", "trb", "rb"]), _col(p1, ["ast", "assists", "as"])
+        
+        c_pts = _col(p1, ["pts", "points", "pt"])
+        c_reb = _col(p1, ["reb", "trb", "rb"])
+        c_ast = _col(p1, ["ast", "assists", "as"])
+        
         if c_pts: res["pts"] = pd.to_numeric(p1[c_pts], errors="coerce").mean()
         if c_reb: res["reb"] = pd.to_numeric(p1[c_reb], errors="coerce").mean()
         if c_ast: res["ast"] = pd.to_numeric(p1[c_ast], errors="coerce").mean()
+        
     if not idf.empty:
         nic = _col(idf, ["player", "name"])
         if nic:
             i1 = idf[idf[nic].astype(str).str.lower().str.contains(player.lower(), na=False)]
-            c_usg, c_min = _col(i1, ["usg", "usage"]), _col(i1, ["min", "minutes", "mp"])
+            c_usg = _col(i1, ["usg", "usage"])
+            c_min = _col(i1, ["min", "minutes", "mp"])
             if c_usg: res["usg"] = pd.to_numeric(i1[c_usg], errors="coerce").mean()
             if c_min: res["min"] = pd.to_numeric(i1[c_min], errors="coerce").mean()
     return res
@@ -190,14 +198,19 @@ def analyze_micro_markets(team: str, opp: str, frames: dict) -> dict:
         
     res["diagnostic"] = f"Columnas FREQ: {list(freq_df.columns) if not freq_df.empty else 'Vacio'} | Columnas FOULS: {list(foul_df.columns) if not foul_df.empty else 'Vacio'}"
     return res
-    with st.sidebar:
+
+# ─────────────────────────────────────────────
+# INTERFAZ (UI)
+# ─────────────────────────────────────────────
+with st.sidebar:
     st.title("NBA PROPS & HUNTER")
     uploaded = st.file_uploader("Sube archivos CTG y NBA", accept_multiple_files=True, type=["csv", "xlsx"])
     if uploaded:
         frames = load_data({str(i): (f.name, f.read()) for i, f in enumerate(uploaded)})
         st.success("¡Base de Datos Fusionada!")
         st.write(f"📂 Archivos Subidos: {len(uploaded)}")
-        for k, v in frames.items(): st.write(f"✅ {k.upper()} ({len(v)})" if not v.empty else f"❌ {k.upper()} (0)")
+        for k, v in frames.items(): 
+            st.write(f"✅ {k.upper()} ({len(v)})" if not v.empty else f"❌ {k.upper()} (0)")
     else:
         frames = {}
 
