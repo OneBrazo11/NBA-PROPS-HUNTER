@@ -15,18 +15,19 @@ def _col(df: pd.DataFrame, candidates: list) -> str | None:
 
 @st.cache_data(show_spinner=False)
 def load_data(files_bytes: dict) -> dict:
-    cats = ["roster", "nbaleaguesumary", "def", "players", "impact", "trends", "shooting", "fouls", "frequency"]
+    cats = ["roster", "nbaleaguesumary", "def", "players", "impact", "trends", "shooting", "fouls", "frequency", "accuracy"]
     frames, temp_dict = {}, {k: [] for k in cats}
     keys_dict = {
         "roster": ["roster", "plantilla", "ref"], 
         "nbaleaguesumary": ["summary", "league", "resumen"], 
         "def": ["def", "defense", "dvp"], 
-        "players": ["players", "jugadores"], 
+        "players": ["players", "jugadores", "overview"], 
         "impact": ["impact", "impacto", "onoff"], 
         "trends": ["trends", "tendencias"],
-        "shooting": ["shooting", "accuracy", "tiros", "overview"],
+        "shooting": ["shooting", "tiros"],
         "fouls": ["foul", "faltas"],
-        "frequency": ["frequency", "frecuencia"]
+        "frequency": ["frequency", "frecuencia"],
+        "accuracy": ["accuracy", "precision"]
     }
     
     for _, (name, raw) in files_bytes.items():
@@ -37,7 +38,6 @@ def load_data(files_bytes: dict) -> dict:
                 df = pd.read_excel(io.BytesIO(raw)) if fname.endswith((".xlsx", ".xls")) else pd.read_csv(io.BytesIO(raw), encoding="latin-1")
                 temp_dict[match].append(_normalize_cols(df))
             except: pass
-            
     for k, v in temp_dict.items():
         frames[k] = pd.concat(v, ignore_index=True) if v else pd.DataFrame()
     return frames
@@ -74,8 +74,7 @@ def _team_momentum(sdf: pd.DataFrame, team: str) -> dict:
     if dc: res["defrtg"] = pd.to_numeric(tdf[dc], errors="coerce").mean()
     if pc: res["pace"] = pd.to_numeric(tdf[pc], errors="coerce").mean()
     return res
-
-def project_game(home: str, away: str, frames: dict, h_imp: float, a_imp: float) -> dict:
+    def project_game(home: str, away: str, frames: dict, h_imp: float, a_imp: float) -> dict:
     hm = _team_momentum(frames.get("nbaleaguesumary", pd.DataFrame()), home)
     am = _team_momentum(frames.get("nbaleaguesumary", pd.DataFrame()), away)
     pace = np.nanmean([hm.get("pace", np.nan), am.get("pace", np.nan)])
@@ -110,23 +109,23 @@ def _player_metrics(pdf: pd.DataFrame, idf: pd.DataFrame, player: str) -> dict:
         sc = _col(p1, ["split", "games"])
         if sc and not p1[p1[sc].astype(str).str.lower().str.contains("l10|last", regex=True, na=False)].empty:
             p1 = p1[p1[sc].astype(str).str.lower().str.contains("l10|last", regex=True, na=False)]
-        
-        c_pts = _col(p1, ["pts", "points", "pt"])
-        c_reb = _col(p1, ["reb", "trb", "rb"])
-        c_ast = _col(p1, ["ast", "assists", "as"])
+            
+        c_pts = "pts" if "pts" in p1.columns else None
+        c_reb = "trb" if "trb" in p1.columns else None
+        c_ast = "ast" if "ast" in p1.columns else None
+        c_min = "mp" if "mp" in p1.columns else None
         
         if c_pts: res["pts"] = pd.to_numeric(p1[c_pts], errors="coerce").mean()
         if c_reb: res["reb"] = pd.to_numeric(p1[c_reb], errors="coerce").mean()
         if c_ast: res["ast"] = pd.to_numeric(p1[c_ast], errors="coerce").mean()
+        if c_min: res["min"] = pd.to_numeric(p1[c_min], errors="coerce").mean()
         
     if not idf.empty:
         nic = _col(idf, ["player", "name"])
         if nic:
             i1 = idf[idf[nic].astype(str).str.lower().str.contains(player.lower(), na=False)]
-            c_usg = _col(i1, ["usg", "usage"])
-            c_min = _col(i1, ["min", "minutes", "mp"])
+            c_usg = "usage" if "usage" in i1.columns else ("usg" if "usg" in i1.columns else None)
             if c_usg: res["usg"] = pd.to_numeric(i1[c_usg], errors="coerce").mean()
-            if c_min: res["min"] = pd.to_numeric(i1[c_min], errors="coerce").mean()
     return res
 
 def _dvp_factor(def_df: pd.DataFrame, opp: str, pos: str) -> float:
@@ -169,13 +168,10 @@ def generate_roster_matrix(team: str, opp: str, frames: dict, out_players: list)
         if pname in out_players: continue
         pos = str(row[pc]) if pc else "UNKN"
         m = _player_metrics(frames.get("players", pd.DataFrame()), frames.get("impact", pd.DataFrame()), pname)
-        
         pts_val = m.get("pts", np.nan)
         if np.isnan(pts_val): continue 
-            
         reb_val, ast_val = m.get("reb", 0.0), m.get("ast", 0.0)
         usg_val, min_val = m.get("usg", np.nan), m.get("min", np.nan)
-        
         dvp = _dvp_factor(frames.get("def", pd.DataFrame()), opp, pos)
         t_dvp, t_vol, risk = evaluate_risk(dvp, usg_val, min_val)
         
@@ -191,26 +187,22 @@ def analyze_micro_markets(team: str, opp: str, frames: dict) -> dict:
     res = {"status": "ok", "diagnostic": ""}
     freq_df = frames.get("frequency", pd.DataFrame())
     foul_df = frames.get("fouls", pd.DataFrame())
+    acc_df = frames.get("accuracy", pd.DataFrame())
     
-    if freq_df.empty and foul_df.empty:
+    if freq_df.empty and foul_df.empty and acc_df.empty:
         res["status"] = "missing"
         return res
         
-    res["diagnostic"] = f"Columnas FREQ: {list(freq_df.columns) if not freq_df.empty else 'Vacio'} | Columnas FOULS: {list(foul_df.columns) if not foul_df.empty else 'Vacio'}"
+    res["diagnostic"] = f"FREQ: {list(freq_df.columns)[:8]} | FOULS: {list(foul_df.columns)[:8]} | ACCURACY: {list(acc_df.columns)[:8]}"
     return res
-
-# ─────────────────────────────────────────────
-# INTERFAZ (UI)
-# ─────────────────────────────────────────────
-with st.sidebar:
+    with st.sidebar:
     st.title("NBA PROPS & HUNTER")
     uploaded = st.file_uploader("Sube archivos CTG y NBA", accept_multiple_files=True, type=["csv", "xlsx"])
     if uploaded:
         frames = load_data({str(i): (f.name, f.read()) for i, f in enumerate(uploaded)})
         st.success("¡Base de Datos Fusionada!")
         st.write(f"📂 Archivos Subidos: {len(uploaded)}")
-        for k, v in frames.items(): 
-            st.write(f"✅ {k.upper()} ({len(v)})" if not v.empty else f"❌ {k.upper()} (0)")
+        for k, v in frames.items(): st.write(f"✅ {k.upper()} ({len(v)})" if not v.empty else f"❌ {k.upper()} (0)")
     else:
         frames = {}
 
@@ -259,29 +251,26 @@ with tab1:
             if out_home or out_away: st.caption(f"Ajuste: {t_home} ({h_impact:+.1f}) | {t_away} ({a_impact:+.1f})")
 
 with tab2:
-    t_target = st.radio("Analizar:", [t_home, t_away], horizontal=True, key="t_prop")
+    t_target = st.radio("Analizar Jugadores de:", [t_home, t_away], horizontal=True, key="t_prop")
     t_opp, current_out = (t_away, out_home) if t_target == t_home else (t_home, out_away)
     
     if st.button(f"Generar Matriz {t_target}", type="primary"):
         df_props = generate_roster_matrix(t_target, t_opp, frames, current_out)
         if df_props.empty: 
-            st.warning("Matriz vacía: Faltan promedios tradicionales (PTS, REB, AST).")
-            st.info("💡 Diagnóstico de Columnas:")
-            st.code(list(frames.get("players", pd.DataFrame()).columns))
-            st.write("👉 Descarga archivos de Basketball-Reference y súbelos junto a CTG.")
+            st.warning("Matriz vacía: Faltan promedios tradicionales (PTS, TRB, AST).")
+            st.info("💡 Diagnóstico: Revisa que subiste el archivo de Basketball-Reference.")
+            st.code(list(frames.get("players", pd.DataFrame()).columns)[:15])
         else: st.dataframe(df_props, use_container_width=True, hide_index=True)
 
 with tab3:
-    st.subheader("Análisis de Líneas Específicas (Triples, Faltas, Ritmo)")
-    st.write("Cruza tendencias ofensivas vs. vulnerabilidades defensivas del rival.")
+    st.subheader("Matchup Táctico: Faltas, Triples, Precisión")
+    t_target_micro = st.radio("Analizar Táctica de:", [t_home, t_away], horizontal=True, key="t_micro")
     
-    t_target_micro = st.radio("Analizar Micro-Mercados para:", [t_home, t_away], horizontal=True, key="t_micro")
-    
-    if st.button(f"Analizar {t_target_micro}", type="primary"):
+    if st.button(f"Ejecutar Modelo para {t_target_micro}", type="primary"):
         m_data = analyze_micro_markets(t_target_micro, t_away if t_target_micro == t_home else t_home, frames)
         
         if m_data["status"] == "missing":
-            st.info("👈 Sube los archivos de 'Frequency' y 'Foul Drawing' de CTG.")
+            st.info("👈 Sube los archivos 'Frequency', 'Foul' o 'Accuracy' de CTG.")
         else:
-            st.warning("Datos leídos. Envíame este diagnóstico para programar el algoritmo:")
+            st.warning("Archivos leídos. Envíame este texto para construir las fórmulas matemáticas exactas:")
             st.code(m_data["diagnostic"])
