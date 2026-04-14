@@ -10,7 +10,6 @@ def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     c = c.str.replace(r"[\s\-/]", "_", regex=True)
     c = c.str.replace(r"[^a-z0-9_]", "", regex=True)
     df.columns = c
-    # Escudo Anti-Colapso: Elimina columnas duplicadas del Excel automáticamente
     df = df.loc[:, ~df.columns.duplicated()]
     return df
 
@@ -61,15 +60,12 @@ def _team_momentum(sdf: pd.DataFrame, team: str) -> dict:
     if oc: res["offrtg"] = pd.to_numeric(tdf[oc], errors="coerce").mean()
     if dc: res["defrtg"] = pd.to_numeric(tdf[dc], errors="coerce").mean()
     if pc: res["pace"] = pd.to_numeric(tdf[pc], errors="coerce").mean()
-    return res
-    
+    return res 
 def project_game(home: str, away: str, frames: dict, h_imp: float, a_imp: float) -> dict:
-    hm = _team_momentum(frames.get("nbaleaguesumary", pd.DataFrame()), home)
-    am = _team_momentum(frames.get("nbaleaguesumary", pd.DataFrame()), away)
+    hm, am = _team_momentum(frames.get("nbaleaguesumary", pd.DataFrame()), home), _team_momentum(frames.get("nbaleaguesumary", pd.DataFrame()), away)
     pace = np.nanmean([hm.get("pace", np.nan), am.get("pace", np.nan)])
     if np.isnan(pace): pace = 98.5
-    ho, hd = hm.get("offrtg", np.nan), hm.get("defrtg", np.nan)
-    ao, ad = am.get("offrtg", np.nan), am.get("defrtg", np.nan)
+    ho, hd, ao, ad = hm.get("offrtg", np.nan), hm.get("defrtg", np.nan), am.get("offrtg", np.nan), am.get("defrtg", np.nan)
     ho_adj = ho + (h_imp/2) if not np.isnan(ho) else np.nan
     hd_adj = hd - (h_imp/2) if not np.isnan(hd) else np.nan
     ao_adj = ao + (a_imp/2) if not np.isnan(ao) else np.nan
@@ -78,34 +74,24 @@ def project_game(home: str, away: str, frames: dict, h_imp: float, a_imp: float)
     a_pts = np.nanmean([ao_adj, hd_adj]) * (pace/100) if not np.isnan(ao_adj) else np.nan
     if not np.isnan(h_pts): h_pts += 1.5
     if not np.isnan(a_pts): a_pts -= 1.5
-    tot = h_pts + a_pts
-    spread = a_pts - h_pts
+    tot, spread = h_pts + a_pts, a_pts - h_pts
     winner = home if (not np.isnan(h_pts) and not np.isnan(a_pts) and h_pts > a_pts) else away
     margin = abs(h_pts - a_pts) if (not np.isnan(h_pts) and not np.isnan(a_pts)) else 0.0
     return {"home_pts": h_pts, "away_pts": a_pts, "total": tot, "spread": spread, "winner": winner, "margin": margin}
 
 def _player_metrics(pdf: pd.DataFrame, idf: pd.DataFrame, player: str) -> dict:
-    res = {"pts": np.nan, "reb": np.nan, "ast": np.nan, "usg": np.nan, "min": np.nan}
+    res = {"pts": 0.0, "trb": 0.0, "ast": 0.0, "stl": 0.0, "blk": 0.0, "orb": 0.0, "drb": 0.0, "usg": np.nan, "mp": 0.0}
     if pdf.empty: return res
     nc = _col(pdf, ["player", "name"])
     if nc:
         p1 = pdf[pdf[nc].astype(str).str.lower().str.contains(player.lower(), na=False)].copy()
-        sc = _col(p1, ["split", "games"])
-        if sc and not p1[p1[sc].astype(str).str.lower().str.contains("l10|last", regex=True, na=False)].empty:
-            p1 = p1[p1[sc].astype(str).str.lower().str.contains("l10|last", regex=True, na=False)]
-        c_pts = "pts" if "pts" in p1.columns else None
-        c_reb = "trb" if "trb" in p1.columns else None
-        c_ast = "ast" if "ast" in p1.columns else None
-        c_min = "mp" if "mp" in p1.columns else None
-        if c_pts: res["pts"] = pd.to_numeric(p1[c_pts], errors="coerce").mean()
-        if c_reb: res["reb"] = pd.to_numeric(p1[c_reb], errors="coerce").mean()
-        if c_ast: res["ast"] = pd.to_numeric(p1[c_ast], errors="coerce").mean()
-        if c_min: res["min"] = pd.to_numeric(p1[c_min], errors="coerce").mean()
+        for m in ["pts", "trb", "ast", "stl", "blk", "orb", "drb", "mp"]:
+            if m in p1.columns: res[m] = pd.to_numeric(p1[m], errors="coerce").mean()
     if not idf.empty:
         nic = _col(idf, ["player", "name"])
         if nic:
             i1 = idf[idf[nic].astype(str).str.lower().str.contains(player.lower(), na=False)]
-            c_usg = "usage" if "usage" in i1.columns else ("usg" if "usg" in i1.columns else None)
+            c_usg = _col(i1, ["usage", "usg"])
             if c_usg: res["usg"] = pd.to_numeric(i1[c_usg], errors="coerce").mean()
     return res
 
@@ -126,15 +112,10 @@ def _dvp_factor(def_df: pd.DataFrame, opp: str, pos: str) -> float:
 def evaluate_risk(dvp: float, usg: float, mins: float) -> tuple:
     s_dvp = 3 if dvp > 1.05 else (1 if dvp < 0.95 else 2)
     t_dvp = "🟢 Favorable" if dvp > 1.05 else ("🔴 Difícil" if dvp < 0.95 else "🟡 Neutro")
-    s_vol, t_vol = 2, "🟡 Rotación"
-    if not np.isnan(usg):
-        s_vol = 3 if usg > 22.0 else (1 if usg < 15.0 else 2)
-        t_vol = "🟢 Foco Ofensivo" if usg > 22.0 else ("🔴 Bajo Uso" if usg < 15.0 else "🟡 Rotación")
-    elif not np.isnan(mins):
-        s_vol = 3 if mins > 28.0 else (1 if mins < 18.0 else 2)
-        t_vol = "🟢 Titular Fijo" if mins > 28.0 else ("🔴 Pocos Minutos" if mins < 18.0 else "🟡 Rotación")
+    s_vol = 3 if (usg > 22 or mins > 28) else (1 if (usg < 15 or mins < 18) else 2)
+    t_vol = "🟢 Foco" if s_vol == 3 else ("🔴 Bajo" if s_vol == 1 else "🟡 Rotación")
     tot = s_dvp + s_vol
-    risk = "🟢 ALTÍSIMA PROB." if tot == 6 else ("🟢 ALTA PROB." if tot == 5 else ("🟡 PROB. MEDIA" if tot == 4 else "🔴 ALTO RIESGO"))
+    risk = "🟢 ALTÍSIMA" if tot == 6 else ("🟢 ALTA" if tot == 5 else ("🟡 MEDIA" if tot == 4 else "🔴 ALTO RIESGO"))
     return t_dvp, t_vol, risk
 
 def generate_roster_matrix(team: str, opp: str, frames: dict, out_players: list) -> pd.DataFrame:
@@ -147,18 +128,13 @@ def generate_roster_matrix(team: str, opp: str, frames: dict, out_players: list)
     for _, row in roster.iterrows():
         pname = str(row[nc])
         if pname in out_players: continue
-        pos = str(row[pc]) if pc else "UNKN"
         m = _player_metrics(frames.get("players", pd.DataFrame()), frames.get("impact", pd.DataFrame()), pname)
-        pts_val = m.get("pts", np.nan)
-        if np.isnan(pts_val): continue
-        reb_val, ast_val = m.get("reb", 0.0), m.get("ast", 0.0)
-        usg_val, min_val = m.get("usg", np.nan), m.get("min", np.nan)
-        dvp = _dvp_factor(frames.get("def", pd.DataFrame()), opp, pos)
-        t_dvp, t_vol, risk = evaluate_risk(dvp, usg_val, min_val)
-        data.append({"Jugador": pname, "Pos": pos, "PTS": round(pts_val * dvp, 1), "REB": round(reb_val * dvp, 1), "AST": round(ast_val * dvp, 1), "PRA": round((pts_val + reb_val + ast_val) * dvp, 1), "1. Matchup (DVP)": t_dvp, "2. Volumen": t_vol, "3. RIESGO": risk})
+        if m["pts"] == 0 and m["trb"] == 0: continue
+        dvp = _dvp_factor(frames.get("def", pd.DataFrame()), opp, str(row[pc]) if pc else "UNKN")
+        t_dvp, t_vol, risk = evaluate_risk(dvp, m["usg"], m["mp"])
+        data.append({"Jugador": pname, "PTS": round(m["pts"]*dvp, 1), "TRB": round(m["trb"]*dvp, 1), "AST": round(m["ast"]*dvp, 1), "STL": round(m["stl"]*dvp, 1), "BLK": round(m["blk"]*dvp, 1), "ORB": round(m["orb"]*dvp, 1), "PRA": round((m["pts"]+m["trb"]+m["ast"])*dvp, 1), "Matchup": t_dvp, "Riesgo": risk})
     return pd.DataFrame(data).sort_values(by="PTS", ascending=False) if data else pd.DataFrame()
-
-def analyze_micro_markets(t_off: str, t_def: str, frames: dict) -> pd.DataFrame:
+    def analyze_micro_markets(t_off: str, t_def: str, frames: dict) -> pd.DataFrame:
     data = []
     def _get_metric(t_name, df_keys, cols, agg='mean'):
         for k in df_keys:
@@ -168,102 +144,59 @@ def analyze_micro_markets(t_off: str, t_def: str, frames: dict) -> pd.DataFrame:
             if not c: continue
             tdf = df[df[tc].astype(str).str.lower().str.contains(t_name.lower(), na=False)] if tc else df
             if tdf.empty: continue
-            if _col(tdf, ["player", "name"]):
-                min_col = _col(tdf, ["min", "mpg", "mp"])
-                if min_col: tdf = tdf.sort_values(by=min_col, ascending=False).head(8)
-                v = pd.to_numeric(tdf[c], errors='coerce').dropna()
-                if not v.empty: return v.sum() if agg == 'sum' else v.mean()
-            else:
-                return pd.to_numeric(tdf[c].iloc[0], errors='coerce')
+            v = pd.to_numeric(tdf[c], errors='coerce').dropna()
+            return v.sum() if agg == 'sum' else v.mean()
         return np.nan
     o_sfld = _get_metric(t_off, ["fouls", "players"], ["sfld", "fta", "ft"], agg='sum')
     if not np.isnan(o_sfld):
-        sig = "🟢 OVER FALTAS (Ataque agresivo)" if o_sfld > 12 else "🔴 UNDER FALTAS (Ataque pasivo)"
-        data.append({"Mercado": "Faltas Recibidas (SFLD)", "Ofensiva": f"{o_sfld:.1f}", "Defensiva Rival": "N/D", "Señal": sig})
-    o_rim = _get_metric(t_off, ["frequency", "shooting"], ["rim", "paint"], agg='mean')
+        sig = "🟢 OVER FALTAS" if o_sfld > 12 else "🔴 UNDER FALTAS"
+        data.append({"Mercado": "Faltas Recibidas", "Ofensiva": round(o_sfld,1), "Señal": sig})
+    o_rim = _get_metric(t_off, ["frequency", "shooting"], ["rim", "paint"])
     if not np.isnan(o_rim):
-        sig = "🟢 ALTO VOLUMEN EN PINTURA" if o_rim > 30 else "🔴 ATAQUE PERIMETRAL"
-        data.append({"Mercado": "Ataque al Aro (Rim Freq %)", "Ofensiva": f"{o_rim:.1f}%", "Defensiva Rival": "N/D", "Señal": sig})
-    o_3p = _get_metric(t_off, ["nbaleaguesumary", "players", "shooting"], ["3pa", "3p_freq", "3p"], agg='mean')
+        sig = "🟢 ATAQUE ARO" if o_rim > 30 else "🔴 PERÍMETRO"
+        data.append({"Mercado": "Rim Freq %", "Ofensiva": round(o_rim,1), "Señal": sig})
+    o_3p = _get_metric(t_off, ["nbaleaguesumary", "players", "shooting"], ["3pa", "3p_freq", "3p"])
     if not np.isnan(o_3p):
-        o_val = o_3p * 100 if o_3p < 2.0 else o_3p
-        sig = "🟢 LÍNEA DE TRIPLES ALTA" if o_val > 35 else "🔴 LÍNEA DE TRIPLES BAJA"
-        data.append({"Mercado": "Volumen Triples (3PA / 3P%)", "Ofensiva": f"{o_val:.1f}", "Defensiva Rival": "N/D", "Señal": sig})
-    if not data:
-        data.append({"Mercado": "Faltan Columnas", "Ofensiva": "-", "Defensiva Rival": "-", "Señal": "⚪ Sube archivos para calcular"})
-    return pd.DataFrame(data)
+        sig = "🟢 LÍNEA ALTA" if o_3p > 35 else "🔴 LÍNEA BAJA"
+        data.append({"Mercado": "Volumen 3P", "Ofensiva": round(o_3p,1), "Señal": sig})
+    return pd.DataFrame(data) if data else pd.DataFrame([{"Mercado": "Sin Datos"}])
 
 with st.sidebar:
     st.title("NBA PROPS & HUNTER")
-    uploaded = st.file_uploader("Sube archivos CTG y NBA", accept_multiple_files=True, type=["csv", "xlsx"])
+    uploaded = st.file_uploader("Sube archivos", accept_multiple_files=True, type=["csv", "xlsx"])
     if uploaded:
         frames = load_data({str(i): (f.name, f.read()) for i, f in enumerate(uploaded)})
-        st.success("¡Base de Datos Fusionada!")
-        st.write(f"📂 Archivos Subidos: {len(uploaded)}")
-        for k, v in frames.items(): st.write(f"✅ {k.upper()} ({len(v)})" if not v.empty else f"❌ {k.upper()} (0)")
+        st.success("Fusionado")
     else: frames = {}
-
-st.title("🏀 NBA PROPS & HUNTER")
 if not frames: st.stop()
-
 teams_set = set()
 for key in ["roster", "nbaleaguesumary", "def"]:
     df = frames.get(key, pd.DataFrame())
     tc = _col(df, ["team", "tm", "team_name", "franchise", "opp"])
-    if not df.empty and tc: teams_set.update(df[tc].dropna().astype(str).unique().tolist())
-teams = sorted([t for t in teams_set if len(t) > 1]) or ["UNK - Sin equipos"]
+    if tc: teams_set.update(df[tc].dropna().astype(str).unique().tolist())
+teams = sorted([t for t in teams_set if len(t) > 1])
 c1, c2 = st.columns(2)
-with c1: t_home = st.selectbox("Local", teams)
-with c2: t_away = st.selectbox("Visitante", teams, index=1 if len(teams)>1 else 0)
-
-st.sidebar.divider()
-st.sidebar.subheader("🚑 Bajas Oficiales")
-
-def get_global_roster(frames: dict) -> list:
-    players = set()
-    for key in ["roster", "players", "fouls", "frequency"]:
-        df = frames.get(key, pd.DataFrame())
-        if not df.empty:
-            p_col = _col(df, ["player", "name", "jugador"])
-            if p_col: players.update(df[p_col].dropna().astype(str).unique().tolist())
-    return sorted(list(players))
-
-roster_list = get_global_roster(frames)
-out_home = st.sidebar.multiselect(f"Bajas de {t_home}", roster_list)
-out_away = st.sidebar.multiselect(f"Bajas de {t_away}", roster_list)
-
-tab1, tab2, tab3 = st.tabs(["🎯 Game Hunter", "💥 Prop Assassin", "🎲 Micro-Mercados"])
-
-with tab1:
-    impact_df = frames.get("impact", pd.DataFrame())
-    h_impact = calculate_absence_impact(t_home, out_home, impact_df)
-    a_impact = calculate_absence_impact(t_away, out_away, impact_df)
-    if st.button("Proyectar Partido", type="primary"):
-        g = project_game(t_home, t_away, frames, h_impact, a_impact)
-        if np.isnan(g.get("total", np.nan)):
-            st.error("Faltan datos en League Summary.")
-        else:
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Ganador", g["winner"].upper(), f"Margin: {g['margin']:.1f}")
-            c2.metric("Total (O/U)", f"{g['total']:.1f}")
-            fav, hcap = (t_home, -abs(g["spread"])) if g["spread"] < 0 else (t_away, -abs(g["spread"]))
-            c3.metric("Handicap", f"{fav} {hcap:.1f}")
-            if out_home or out_away: st.caption(f"Ajuste: {t_home} ({h_impact:+.1f}) | {t_away} ({a_impact:+.1f})")
-
-with tab2:
-    opts = [t_home, t_away] if t_home != t_away else [t_home]
-    t_target = st.radio("Analizar Jugadores de:", opts, horizontal=True, key="t_prop")
-    t_opp, current_out = (t_away, out_home) if t_target == t_home else (t_home, out_away)
-    if st.button(f"Generar Matriz {t_target}", type="primary"):
-        df_props = generate_roster_matrix(t_target, t_opp, frames, current_out)
-        if df_props.empty: st.warning("Matriz vacía: Faltan promedios tradicionales (PTS, TRB, AST).")
-        else: st.dataframe(df_props, use_container_width=True, hide_index=True)
-
-with tab3:
-    st.subheader("Matchup Táctico: Faltas, Triples, Pintura")
-    st.write("Datos de la rotación principal vs Estilo Defensivo.")
-    opts_m = [t_home, t_away] if t_home != t_away else [t_home]
-    t_target_micro = st.radio("Analizar Táctica de:", opts_m, horizontal=True, key="t_micro")
-    if st.button(f"Ejecutar Modelo de {t_target_micro}", type="primary"):
-        df_micro = analyze_micro_markets(t_target_micro, t_away if t_target_micro == t_home else t_home, frames)
-        st.dataframe(df_micro, use_container_width=True, hide_index=True)
+t_home = c1.selectbox("Local", teams)
+t_away = c2.selectbox("Visitante", teams, index=1 if len(teams)>1 else 0)
+def get_global_roster(frames):
+    p = set()
+    for k in ["roster", "players", "fouls", "frequency"]:
+        df = frames.get(k, pd.DataFrame())
+        col = _col(df, ["player", "name"])
+        if col: p.update(df[col].dropna().astype(str).unique().tolist())
+    return sorted(list(p))
+out_home = st.sidebar.multiselect(f"Bajas {t_home}", get_global_roster(frames))
+out_away = st.sidebar.multiselect(f"Bajas {t_away}", get_global_roster(frames))
+t1, t2, t3 = st.tabs(["🎯 Hunter", "💥 Props", "🎲 Micro"])
+with t1:
+    imp = frames.get("impact", pd.DataFrame())
+    if st.button("Proyectar"):
+        g = project_game(t_home, t_away, frames, calculate_absence_impact(t_home, out_home, imp), calculate_absence_impact(t_away, out_away, imp))
+        st.metric("Ganador", g["winner"].upper(), f"Margen: {g['margin']:.1f}")
+        st.metric("Total", f"{g['total']:.1f}")
+with t2:
+    if st.button("Generar Props"):
+        st.dataframe(generate_roster_matrix(t_home, t_away, frames, out_home))
+with t3:
+    if st.button("Analizar Táctica"):
+        st.dataframe(analyze_micro_markets(t_home, t_away, frames))
