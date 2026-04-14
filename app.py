@@ -15,7 +15,7 @@ def _col(df: pd.DataFrame, candidates: list) -> str | None:
     return next((c for c in candidates if c in df.columns), None)
 
 def _match_team(val, target, fname=""):
-    v, t, f = str(val).lower(), str(target).lower(), fname.lower()
+    v, t, f = str(val).lower().strip(), str(target).lower().strip(), fname.lower()
     if v == t or v in t or t in v or t in f: return True
     d = {"sas":"san antonio", "den":"denver", "bos":"boston", "gsw":"golden", "lal":"lakers", "nyk":"york", "okc":"oklahoma"}
     return any(k in v or k in f for k, full in d.items() if full in t)
@@ -48,8 +48,7 @@ def calculate_absence_impact(team: str, out_pl: list, imp_df: pd.DataFrame) -> f
     if imp_df.empty or not out_pl: return 0.0
     p_col, d_col = _col(imp_df, ["player", "name"]), _col(imp_df, ["diff_pts_per_100_poss", "diff"])
     if not (p_col and d_col): return 0.0
-    # Filtramos por jugadores que están OUT
-    impacto = imp_df[imp_df[p_col].isin(out_pl)]
+    impacto = imp_df[imp_df[p_col].astype(str).isin(out_pl)]
     return -pd.to_numeric(impacto[d_col], errors='coerce').sum()
 
 def _team_momentum(sdf: pd.DataFrame, team: str) -> dict:
@@ -68,7 +67,6 @@ def project_game(home: str, away: str, frames: dict, h_imp: float, a_imp: float)
     h = _team_momentum(frames.get("nbaleaguesumary", pd.DataFrame()), home)
     a = _team_momentum(frames.get("nbaleaguesumary", pd.DataFrame()), away)
     pace = np.nanmean([h["pace"], a["pace"]])
-    # Proyección con impacto de bajas (Wemby effect)
     h_pts = (h["off"] + h_imp + a["def"]) / 2 * (pace/100) + 1.5
     a_pts = (a["off"] + a_imp + h["def"]) / 2 * (pace/100)
     return {"h_pts": h_pts, "a_pts": a_pts, "total": h_pts + a_pts, "winner": home if h_pts > a_pts else away, "spread": a_pts - h_pts}
@@ -77,18 +75,28 @@ def generate_roster(team: str, frames: dict, out_players: list) -> pd.DataFrame:
     df = frames.get("players", pd.DataFrame())
     tc, nc = _col(df, ["team", "tm"]), _col(df, ["player", "name"])
     if df.empty or not nc: return pd.DataFrame()
-    # Filtro estricto por equipo para evitar mezcla Jokic/Wemby
     tdf = df[df.apply(lambda r: _match_team(r[tc] if tc else "", team, r["_source"]), axis=1)]
     data = []
     for _, row in tdf.iterrows():
         pname = str(row[nc])
-        if pname in out_players or pname == "nan": continue
+        if pname in out_players or pname.lower() in ["nan", "none"]: continue
         pts = pd.to_numeric(row.get("pts", 0), errors="coerce")
         reb = pd.to_numeric(row.get("trb", row.get("reb", 0)), errors="coerce")
         ast = pd.to_numeric(row.get("ast", 0), errors="coerce")
         if pts > 0:
             data.append({"Jugador": pname, "Floor Safe": round(pts*0.7, 1), "PTS": pts, "REB": reb, "AST": ast, "PRA": pts+reb+ast})
     return pd.DataFrame(data).sort_values(by="PTS", ascending=False) if data else pd.DataFrame()
+
+def get_players_by_team(f, t):
+    p = set()
+    df = f.get("players", pd.DataFrame())
+    nc, tc = _col(df, ["player", "name"]), _col(df, ["team", "tm"])
+    if not df.empty and nc:
+        tdf = df[df.apply(lambda r: _match_team(r[tc] if tc else "", t, r["_source"]), axis=1)]
+        p.update(tdf[nc].astype(str).tolist())
+    # Limpieza estricta para evitar TypeError: sorted
+    clean_list = [str(x) for x in p if str(x).lower() not in ["nan", "none", ""]]
+    return sorted(clean_list)
 
 with st.sidebar:
     st.title("🏀 NBA HUNTER PRO")
@@ -106,16 +114,6 @@ teams = sorted(list(frames["nbaleaguesumary"][_col(frames["nbaleaguesumary"], ["
 c1, c2 = st.columns(2)
 t_h = c1.selectbox("Local", teams)
 t_a = c2.selectbox("Visitante", teams, index=1 if len(teams)>1 else 0)
-
-# Obtener lista de jugadores por equipo (Sin mezcla)
-def get_players_by_team(f, t):
-    p = set()
-    df = f.get("players", pd.DataFrame())
-    nc, tc = _col(df, ["player", "name"]), _col(df, ["team", "tm"])
-    if not df.empty and nc:
-        tdf = df[df.apply(lambda r: _match_team(r[tc] if tc else "", t, r["_source"]), axis=1)]
-        p.update(tdf[nc].astype(str).tolist())
-    return sorted([x for x in p if x != "nan"])
 
 out_h = st.sidebar.multiselect(f"Bajas {t_h}", get_players_by_team(frames, t_h))
 out_a = st.sidebar.multiselect(f"Bajas {t_a}", get_players_by_team(frames, t_a))
