@@ -6,8 +6,12 @@ import io
 st.set_page_config(page_title="NBA PROPS & HUNTER", page_icon="🏀", layout="wide")
 
 def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
-    c = df.columns.str.strip().str.lower()
-    df.columns = c.str.replace(r"[\s\-/]", "_", regex=True).str.replace(r"[^a-z0-9_]", "", regex=True)
+    c = df.columns.astype(str).str.strip().str.lower()
+    c = c.str.replace(r"[\s\-/]", "_", regex=True)
+    c = c.str.replace(r"[^a-z0-9_]", "", regex=True)
+    df.columns = c
+    # Escudo Anti-Colapso: Elimina columnas duplicadas del Excel automáticamente
+    df = df.loc[:, ~df.columns.duplicated()]
     return df
 
 def _col(df: pd.DataFrame, candidates: list) -> str | None:
@@ -58,7 +62,7 @@ def _team_momentum(sdf: pd.DataFrame, team: str) -> dict:
     if dc: res["defrtg"] = pd.to_numeric(tdf[dc], errors="coerce").mean()
     if pc: res["pace"] = pd.to_numeric(tdf[pc], errors="coerce").mean()
     return res
-
+    
 def project_game(home: str, away: str, frames: dict, h_imp: float, a_imp: float) -> dict:
     hm = _team_momentum(frames.get("nbaleaguesumary", pd.DataFrame()), home)
     am = _team_momentum(frames.get("nbaleaguesumary", pd.DataFrame()), away)
