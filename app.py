@@ -206,30 +206,28 @@ def analyze_micro_markets(t_off: str, t_def: str, frames: dict) -> pd.DataFrame:
                 return pd.to_numeric(tdf[c].iloc[0], errors='coerce')
         return np.nan
 
-    # 1. Tiros Libres y Faltas (SFLD = Shooting Fouls Drawn)
     o_sfld = _get_metric(t_off, ["fouls", "players"], ["sfld", "fta", "ft"], agg='sum')
     if not np.isnan(o_sfld):
         sig = "🟢 OVER FALTAS / LIBRES (Ataque muy agresivo)" if o_sfld > 12 else "🔴 UNDER FALTAS (Ataque pasivo)"
-        data.append({"Mercado": "Faltas Recibidas (Shooting Fouls)", "Ofensiva": f"{o_sfld:.1f}", "Defensiva Rival": "N/D", "Señal": sig})
+        data.append({"Mercado": "Faltas Recibidas (SFLD)", "Ofensiva": f"{o_sfld:.1f}", "Defensiva Rival": "N/D", "Señal": sig})
 
-    # 2. Ataque a la Pintura (RIM Freq)
     o_rim = _get_metric(t_off, ["frequency", "shooting"], ["rim", "paint"], agg='mean')
     if not np.isnan(o_rim):
         sig = "🟢 ALTO VOLUMEN EN PINTURA" if o_rim > 30 else "🔴 ATAQUE PERIMETRAL"
         data.append({"Mercado": "Ataque al Aro (Rim Freq %)", "Ofensiva": f"{o_rim:.1f}%", "Defensiva Rival": "N/D", "Señal": sig})
 
-    # 3. Triples
     o_3p = _get_metric(t_off, ["nbaleaguesumary", "players", "shooting"], ["3pa", "3p_freq", "3p"], agg='mean')
     if not np.isnan(o_3p):
         o_val = o_3p * 100 if o_3p < 2.0 else o_3p
         sig = "🟢 LÍNEA DE TRIPLES ALTA" if o_val > 35 else "🔴 LÍNEA DE TRIPLES BAJA"
-        data.append({"Mercado": "Volumen de Triples (3PA / 3P%)", "Ofensiva": f"{o_val:.1f}", "Defensiva Rival": "N/D", "Señal": sig})
+        data.append({"Mercado": "Volumen Triples (3PA / 3P%)", "Ofensiva": f"{o_val:.1f}", "Defensiva Rival": "N/D", "Señal": sig})
 
     if not data:
         data.append({"Mercado": "Faltan Columnas", "Ofensiva": "-", "Defensiva Rival": "-", "Señal": "⚪ Sube los archivos para calcular"})
         
     return pd.DataFrame(data)
-    with st.sidebar:
+
+with st.sidebar:
     st.title("NBA PROPS & HUNTER")
     uploaded = st.file_uploader("Sube archivos CTG y NBA", accept_multiple_files=True, type=["csv", "xlsx"])
     if uploaded:
@@ -257,7 +255,6 @@ with c2: t_away = st.selectbox("Visitante", teams, index=1 if len(teams)>1 else 
 st.sidebar.divider()
 st.sidebar.subheader("🚑 Bajas Oficiales")
 
-# SOLUCIÓN DE BAJAS: BUSCADOR GLOBAL EN TODA LA BASE DE DATOS
 def get_global_roster(frames: dict) -> list:
     players = set()
     for key in ["roster", "players", "fouls", "frequency"]:
