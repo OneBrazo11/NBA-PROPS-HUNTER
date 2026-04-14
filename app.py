@@ -158,7 +158,7 @@ def evaluate_risk(dvp: float, usg: float, mins: float) -> tuple:
 
 def generate_roster_matrix(team: str, opp: str, frames: dict, out_players: list) -> pd.DataFrame:
     rdf = frames.get("roster", pd.DataFrame())
-    if rdf.empty: rdf = frames.get("players", pd.DataFrame()) # Fallback
+    if rdf.empty: rdf = frames.get("players", pd.DataFrame())
     tc, nc, pc = _col(rdf, ["team", "tm"]), _col(rdf, ["player", "name"]), _col(rdf, ["pos", "position"])
     if rdf.empty or not nc: return pd.DataFrame()
     
@@ -170,7 +170,7 @@ def generate_roster_matrix(team: str, opp: str, frames: dict, out_players: list)
         pos = str(row[pc]) if pc else "UNKN"
         m = _player_metrics(frames.get("players", pd.DataFrame()), frames.get("impact", pd.DataFrame()), pname)
         pts_val = m.get("pts", np.nan)
-        if np.isnan(pts_val): continue 
+        if np.isnan(pts_val): continue
         reb_val, ast_val = m.get("reb", 0.0), m.get("ast", 0.0)
         usg_val, min_val = m.get("usg", np.nan), m.get("min", np.nan)
         dvp = _dvp_factor(frames.get("def", pd.DataFrame()), opp, pos)
@@ -226,8 +226,7 @@ def analyze_micro_markets(t_off: str, t_def: str, frames: dict) -> pd.DataFrame:
         data.append({"Mercado": "Faltan Columnas", "Ofensiva": "-", "Defensiva Rival": "-", "Señal": "⚪ Sube los archivos para calcular"})
         
     return pd.DataFrame(data)
-
-with st.sidebar:
+    with st.sidebar:
     st.title("NBA PROPS & HUNTER")
     uploaded = st.file_uploader("Sube archivos CTG y NBA", accept_multiple_files=True, type=["csv", "xlsx"])
     if uploaded:
