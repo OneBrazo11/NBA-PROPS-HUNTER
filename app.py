@@ -7,175 +7,125 @@ st.set_page_config(page_title="NBA PROPS & HUNTER", page_icon="🏀", layout="wi
 
 def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     c = df.columns.astype(str).str.strip().str.lower()
-    c = c.str.replace(r"[\s\-/]", "_", regex=True)
-    c = c.str.replace(r"[^a-z0-9_]", "", regex=True)
+    c = c.str.replace(r"[\s\-/]", "_", regex=True).str.replace(r"[^a-z0-9_]", "", regex=True)
     df.columns = c
-    df = df.loc[:, ~df.columns.duplicated()]
-    return df
+    return df.loc[:, ~df.columns.duplicated()]
 
 def _col(df: pd.DataFrame, candidates: list) -> str | None:
     return next((c for c in candidates if c in df.columns), None)
 
-def _match_team(val, target, fname=""):
-    v, t, f = str(val).lower().strip(), str(target).lower().strip(), fname.lower()
-    # Prioridad 1: Nombre del equipo en la celda
-    if v == t or v in t or t in v: return True
-    # Prioridad 2: Nombre del equipo en el nombre del archivo
-    if t in f: return True
-    # Prioridad 3: Diccionario de abreviaturas
-    d = {"sas":"san antonio", "den":"denver", "bos":"boston", "gsw":"golden", "lal":"lakers", "lac":"clipper", "nyk":"new york", "okc":"oklahoma", "phx":"phoenix", "nop":"new orleans", "min":"minnesota", "sac":"sacramento", "dal":"dallas", "mia":"miami", "mem":"memphis", "orl":"orlando", "phi":"philadelphia", "tor":"toronto", "chi":"chicago", "cle":"cleveland", "det":"detroit", "ind":"indiana", "mil":"milwaukee", "atl":"atlanta", "cha":"charlotte", "was":"washington", "uta":"utah", "por":"portland", "hou":"houston", "bkn":"brooklyn"}
-    if v in d and d[v] in t: return True
-    if t in d and d[t] in v: return True
-    return False
+def _is_team(val, target, fname):
+    v, t, f = str(val).lower(), str(target).lower(), fname.lower()
+    if t in v or v in t or t in f: return True
+    d = {"sas":"san antonio", "den":"denver", "gsw":"golden", "lal":"lakers"}
+    return any(k in v or k in f for k, full in d.items() if full in t)
 
 @st.cache_data(show_spinner=False)
 def load_data(files_bytes: dict) -> dict:
-    cats = ["roster", "nbaleaguesumary", "def", "players", "impact", "trends", "shooting", "fouls", "frequency", "accuracy"]
+    cats = ["roster", "nbaleaguesumary", "def", "players", "impact", "fouls", "frequency"]
     frames, temp_dict = {}, {k: [] for k in cats}
-    keys_dict = {"roster": ["roster", "plantilla", "ref"], "nbaleaguesumary": ["summary", "league", "resumen"], "def": ["def", "defense", "dvp"], "players": ["players", "jugadores", "overview"], "impact": ["impact", "impacto", "onoff"], "trends": ["trends", "tendencias"], "shooting": ["shooting", "tiros"], "fouls": ["foul", "faltas"], "frequency": ["frequency", "frecuencia"], "accuracy": ["accuracy", "precision"]}
+    keys = {"roster": ["ref", "roster"], "nbaleaguesumary": ["summary", "league"], "def": ["defense", "dvp"], "players": ["players", "overview"], "impact": ["impact", "onoff"], "fouls": ["foul"], "frequency": ["frequency"]}
     for _, (name, raw) in files_bytes.items():
         fname = name.lower()
-        match = next((k for k, aliases in keys_dict.items() if any(a in fname for a in aliases)), None)
+        match = next((k for k, aliases in keys.items() if any(a in fname for a in aliases)), None)
         if match:
             try:
                 df = pd.read_excel(io.BytesIO(raw)) if fname.endswith((".xlsx", ".xls")) else pd.read_csv(io.BytesIO(raw), encoding="latin-1")
                 df = _normalize_cols(df)
-                df["_source_file"] = fname
+                df["_file"] = fname
                 temp_dict[match].append(df)
             except: pass
     for k, v in temp_dict.items():
-        if v:
-            res = pd.concat(v, ignore_index=True)
-            p_col = _col(res, ["player", "name"])
-            if p_col: res = res.drop_duplicates(subset=[p_col, "_source_file"])
-            frames[k] = res
-        else: frames[k] = pd.DataFrame()
+        frames[k] = pd.concat(v, ignore_index=True) if v else pd.DataFrame()
     return frames
 
-def calculate_absence_impact(team: str, out_pl: list, imp_df: pd.DataFrame) -> float:
+def calculate_absence_impact(team, out_pl, imp_df):
     if imp_df.empty or not out_pl: return 0.0
-    p_col, d_col = _col(imp_df, ["player", "name"]), _col(imp_df, ["diff_pts_per_100_poss", "on_off_diff", "diff"])
-    if not (p_col and d_col): return 0.0
-    tot = 0.0
-    for p in out_pl:
-        v = imp_df[imp_df[p_col].astype(str) == p][d_col]
-        if not v.empty:
-            val = pd.to_numeric(v.iloc[0], errors='coerce')
-            if not np.isnan(val): tot -= val
-    return tot
+    p_c, d_c = _col(imp_df, ["player", "name"]), _col(imp_df, ["diff_pts_per_100_poss", "diff"])
+    if not (p_c and d_c): return 0.0
+    v = imp_df[imp_df[p_c].isin(out_pl)][d_c]
+    return -pd.to_numeric(v, errors='coerce').sum()
 
-def _team_momentum(sdf: pd.DataFrame, team: str) -> dict:
-    res = {"offrtg": np.nan, "defrtg": np.nan, "pace": np.nan}
-    tc = _col(sdf, ["team", "tm", "team_name"])
+def _team_momentum(sdf, team):
+    res = {"off": np.nan, "def": np.nan, "pace": np.nan}
+    tc = _col(sdf, ["team", "tm"])
     if not tc or sdf.empty: return res
-    tdf = sdf[sdf.apply(lambda r: _match_team(r[tc], team, r.get("_source_file", "")), axis=1)].copy()
+    tdf = sdf[sdf.apply(lambda r: _is_team(r[tc], team, r["_file"]), axis=1)]
     if tdf.empty: return res
-    l10 = _col(tdf, ["split", "last_n", "games"])
-    if l10 and tdf[l10].astype(str).str.lower().str.contains("l10|last", regex=True, na=False).any():
-        tdf = tdf[tdf[l10].astype(str).str.lower().str.contains("l10|last", regex=True, na=False)]
-    oc, dc, pc = _col(tdf, ["offrtg", "ortg", "offense"]), _col(tdf, ["defrtg", "drtg", "defense"]), _col(tdf, ["pace", "poss"])
-    if oc: res["offrtg"] = pd.to_numeric(tdf[oc], errors="coerce").mean()
-    if dc: res["defrtg"] = pd.to_numeric(tdf[dc], errors="coerce").mean()
+    oc, dc, pc = _col(tdf, ["offrtg", "ortg"]), _col(tdf, ["defrtg", "drtg"]), _col(tdf, ["pace", "poss"])
+    if oc: res["off"] = pd.to_numeric(tdf[oc], errors="coerce").mean()
+    if dc: res["def"] = pd.to_numeric(tdf[dc], errors="coerce").mean()
     if pc: res["pace"] = pd.to_numeric(tdf[pc], errors="coerce").mean()
     return res
 
-def project_game(home: str, away: str, frames: dict, h_imp: float, a_imp: float) -> dict:
-    hm, am = _team_momentum(frames.get("nbaleaguesumary", pd.DataFrame()), home), _team_momentum(frames.get("nbaleaguesumary", pd.DataFrame()), away)
-    pace = np.nanmean([hm.get("pace", np.nan), am.get("pace", np.nan)])
-    if np.isnan(pace): pace = 98.5
-    ho, hd, ao, ad = hm.get("offrtg", np.nan), hm.get("defrtg", np.nan), am.get("offrtg", np.nan), am.get("defrtg", np.nan)
-    ho_adj, ao_adj = ho + h_imp if not np.isnan(ho) else np.nan, ao + a_imp if not np.isnan(ao) else np.nan
-    h_pts = np.nanmean([ho_adj, ad]) * (pace/100) if not np.isnan(ho_adj) else np.nan
-    a_pts = np.nanmean([ao_adj, hd]) * (pace/100) if not np.isnan(ao_adj) else np.nan
-    if not np.isnan(h_pts): h_pts += 1.5
-    tot, winner = h_pts + a_pts, home if (not np.isnan(h_pts) and not np.isnan(a_pts) and h_pts > a_pts) else away
-    return {"home_pts": h_pts, "away_pts": a_pts, "total": tot, "winner": winner, "margin": abs(h_pts - a_pts)}
-
-def generate_roster_matrix(team: str, frames: dict, out_players: list) -> pd.DataFrame:
-    # FILTRO DE EQUIPO ESTRICTO (Para evitar mezcla Jokic/Wemby)
-    rdf = frames.get("roster", pd.DataFrame())
-    if rdf.empty: rdf = frames.get("players", pd.DataFrame())
-    tc, nc = _col(rdf, ["team", "tm"]), _col(rdf, ["player", "name"])
-    if rdf.empty or not nc: return pd.DataFrame()
-    # Solo jugadores que pertenezcan al equipo target (por celda o por nombre de archivo)
-    roster = rdf[rdf.apply(lambda r: _match_team(r[tc], team, r.get("_source_file", "")), axis=1)] if tc else rdf
+def generate_roster(team, frames, out_p):
+    df = frames.get("players", pd.DataFrame())
+    if df.empty: df = frames.get("roster", pd.DataFrame())
+    nc, tc = _col(df, ["player", "name"]), _col(df, ["team", "tm"])
+    if df.empty or not nc: return pd.DataFrame()
+    # Filtro estricto por equipo y archivo
+    tdf = df[df.apply(lambda r: _is_team(r[tc] if tc else "", team, r["_file"]), axis=1)]
     data = []
-    for _, row in roster.iterrows():
-        pname = str(row[nc])
-        if pname in out_players: continue
-        res = {"pts": 0.0, "trb": 0.0, "ast": 0.0, "stl": 0.0, "blk": 0.0, "orb": 0.0, "mp": 0.0}
-        for m in res.keys():
-            if m in row.index: res[m] = pd.to_numeric(row[m], errors="coerce")
-        if res["pts"] == 0 and res["trb"] == 0: continue
-        data.append({"Jugador": pname, "Floor Safe": round(res["pts"]*0.7, 1), "Proj PTS": round(res["pts"], 1), "TRB": round(res["trb"], 1), "AST": round(res["ast"], 1), "STL/BLK": f"{round(res['stl'],1)}/{round(res['blk'],1)}", "ORB": round(res['orb'], 1), "MP": round(res['mp'], 1)})
-    return pd.DataFrame(data).sort_values(by="Proj PTS", ascending=False) if data else pd.DataFrame()
+    for _, r in tdf.iterrows():
+        name = str(r[nc])
+        if name in out_p: continue
+        pts = pd.to_numeric(r.get("pts", 0), errors='coerce')
+        if pts > 0:
+            data.append({"Jugador": name, "Floor": round(pts*0.7, 1), "Proj PTS": round(pts, 1), "REB": r.get("trb", 0), "AST": r.get("ast", 0)})
+    return pd.DataFrame(data).sort_values("Proj PTS", ascending=False) if data else pd.DataFrame()
 
-def analyze_team_tactics(team: str, frames: dict):
-    res = {"Faltas (SFLD)": "-", "Pintura (RIM)": "-", "Triples (3PA)": "-"}
-    def _get(cat, cols):
+def analyze_tactics(team, frames):
+    res = {"Faltas": "-", "Pintura": "-", "Triples": "-"}
+    # Búsqueda en Fouls y Frequency
+    for cat, k, cols in [("fouls", "Faltas", ["sfld", "fta"]), ("frequency", "Pintura", ["rim", "paint"]), ("nbaleaguesumary", "Triples", ["3pa", "3p_freq"])]:
         df = frames.get(cat, pd.DataFrame())
-        if df.empty: return np.nan
-        tc, c = _col(df, ["team", "tm", "franchise"]), _col(df, cols)
-        if not (tc and c): return np.nan
-        # Filtro de equipo para micro-mercados
-        tdf = df[df.apply(lambda r: _match_team(r[tc], team, r.get("_source_file", "")), axis=1)]
-        return pd.to_numeric(tdf[c], errors='coerce').mean() if not tdf.empty else np.nan
-    
-    s = _get("fouls", ["sfld", "fta", "ft_rate"])
-    r = _get("frequency", ["rim", "paint", "rim_freq"])
-    t = _get("nbaleaguesumary", ["3pa", "3p_freq", "three_point_rate"])
-    
-    if not np.isnan(s): res["Faltas (SFLD)"] = round(s, 1)
-    if not np.isnan(r): res["Pintura (RIM)"] = f"{round(r, 1)}%"
-    if not np.isnan(t): res["Triples (3PA)"] = round(t, 1)
+        if not df.empty:
+            tc, c = _col(df, ["team", "tm"]), _col(df, cols)
+            tdf = df[df.apply(lambda r: _is_team(r[tc] if tc else "", team, r["_file"]), axis=1)]
+            if not tdf.empty and c:
+                val = pd.to_numeric(tdf[c], errors='coerce').mean()
+                res[k] = f"{round(val, 1)}%" if "rim" in c else round(val, 1)
     return res
 
 with st.sidebar:
-    st.title("NBA PROPS & HUNTER")
-    uploaded = st.file_uploader("Sube archivos", accept_multiple_files=True)
-    if uploaded:
-        frames = load_data({str(i): (f.name, f.read()) for i, f in enumerate(uploaded)})
-        st.success("¡Fusionado!")
-        for k, v in frames.items(): st.write(f"✅ {k.upper()} ({len(v)})" if not v.empty else f"❌ {k.upper()} (0)")
-    else: frames = {}
+    st.title("NBA HUNTER")
+    up = st.file_uploader("Archivos", accept_multiple_files=True)
+    frames = load_data({str(i): (f.name, f.read()) for i, f in enumerate(up)}) if up else {}
+    if frames: st.success("Datos Cargados")
 
 if not frames: st.stop()
-
-summary_df = frames.get("nbaleaguesumary", pd.DataFrame())
-team_col = _col(summary_df, ["team", "tm"])
-teams = sorted(list(summary_df[team_col].dropna().unique())) if team_col else ["Carga League Summary"]
-
+teams = sorted(list(frames["nbaleaguesumary"][_col(frames["nbaleaguesumary"], ["team", "tm"])].unique()))
 c1, c2 = st.columns(2)
-t_home = c1.selectbox("Local", teams)
-t_away = c2.selectbox("Visitante", teams, index=1 if len(teams)>1 else 0)
+t_h, t_a = c1.selectbox("Local", teams, 0), c2.selectbox("Visita", teams, 1)
 
-# Jugadores únicos por equipo para las bajas
-def get_team_players(frames, team):
+def get_p(f, t):
     p = set()
     for k in ["players", "roster"]:
-        df = frames.get(k, pd.DataFrame())
-        if not df.empty:
-            tc, nc = _col(df, ["team", "tm"]), _col(df, ["player", "name"])
-            if tc and nc:
-                tdf = df[df.apply(lambda r: _match_team(r[tc], team, r.get("_source_file", "")), axis=1)]
-                p.update(tdf[nc].dropna().unique().tolist())
+        df = f.get(k, pd.DataFrame())
+        nc, tc = _col(df, ["player", "name"]), _col(df, ["team", "tm"])
+        if not df.empty and nc:
+            tdf = df[df.apply(lambda r: _is_team(r[tc] if tc else "", t, r["_file"]), axis=1)]
+            p.update(tdf[nc].tolist())
     return sorted(list(p))
 
-out_h = st.sidebar.multiselect(f"Bajas {t_home}", get_team_players(frames, t_home))
-out_a = st.sidebar.multiselect(f"Bajas {t_away}", get_team_players(frames, t_away))
+out_h, out_a = st.sidebar.multiselect(f"Bajas {t_h}", get_p(frames, t_h)), st.sidebar.multiselect(f"Bajas {t_a}", get_p(frames, t_a))
 
-t1, t2, t3 = st.tabs(["🎯 Hunter", "💥 Props", "🎲 Micro"])
-with t1:
-    if st.button("Proyectar Game"):
-        imp = frames.get("impact", pd.DataFrame())
-        g = project_game(t_home, t_away, frames, calculate_absence_impact(t_home, out_h, imp), calculate_absence_impact(t_away, out_a, imp))
-        st.metric(f"Ganador: {g['winner']}", f"{g['home_pts']:.1f} - {g['away_pts']:.1f}", f"Total: {g['total']:.1f}")
-with t2:
-    if st.button("Generar Props"):
-        st.subheader(f"Props: {t_home}"); st.dataframe(generate_roster_matrix(t_home, frames, out_h), use_container_width=True)
-        st.subheader(f"Props: {t_away}"); st.dataframe(generate_roster_matrix(t_away, frames, out_a), use_container_width=True)
-with t3:
-    if st.button("Analizar Táctica"):
-        c1, c2 = st.columns(2)
-        c1.subheader(f"📊 {t_home}"); c1.table(pd.Series(analyze_team_tactics(t_home, frames)))
-        c2.subheader(f"📊 {t_away}"); c2.table(pd.Series(analyze_team_tactics(t_away, frames)))
+tab1, tab2, tab3 = st.tabs(["🎯 Hunter", "💥 Props", "🎲 Micro"])
+with tab1:
+    if st.button("Proyectar"):
+        h, a = _team_momentum(frames["nbaleaguesumary"], t_h), _team_momentum(frames["nbaleaguesumary"], t_a)
+        imp_h, imp_a = calculate_absence_impact(t_h, out_h, frames["impact"]), calculate_absence_impact(t_a, out_a, frames["impact"])
+        pace = np.nanmean([h["pace"], a["pace"]])
+        p_h = (h["off"] + imp_h + a["def"]) / 2 * (pace/100)
+        p_a = (a["off"] + imp_a + h["def"]) / 2 * (pace/100)
+        st.metric(f"Ganador: {t_h if p_h > p_a else t_a}", f"{p_h:.1f} - {p_a:.1f}")
+with tab2:
+    if st.button("Generar"):
+        st.subheader(t_h); st.dataframe(generate_roster(t_h, frames, out_h), use_container_width=True)
+        st.subheader(t_a); st.dataframe(generate_roster(t_a, frames, out_a), use_container_width=True)
+with tab3:
+    if st.button("Analizar"):
+        col1, col2 = st.columns(2)
+        col1.table(pd.Series(analyze_tactics(t_h, frames), name=t_h))
+        col2.table(pd.Series(analyze_tactics(t_a, frames), name=t_a))
+    
