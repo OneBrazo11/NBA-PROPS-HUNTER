@@ -158,10 +158,11 @@ def evaluate_risk(dvp: float, usg: float, mins: float) -> tuple:
 
 def generate_roster_matrix(team: str, opp: str, frames: dict, out_players: list) -> pd.DataFrame:
     rdf = frames.get("roster", pd.DataFrame())
+    if rdf.empty: rdf = frames.get("players", pd.DataFrame()) # Fallback
     tc, nc, pc = _col(rdf, ["team", "tm"]), _col(rdf, ["player", "name"]), _col(rdf, ["pos", "position"])
-    if rdf.empty or not (tc and nc): return pd.DataFrame()
+    if rdf.empty or not nc: return pd.DataFrame()
     
-    roster = rdf[rdf[tc].astype(str).str.lower().str.contains(team.lower(), na=False)]
+    roster = rdf[rdf[tc].astype(str).str.lower().str.contains(team.lower(), na=False)] if tc else rdf
     data = []
     for _, row in roster.iterrows():
         pname = str(row[nc])
@@ -183,18 +184,51 @@ def generate_roster_matrix(team: str, opp: str, frames: dict, out_players: list)
         })
     return pd.DataFrame(data).sort_values(by="PTS", ascending=False) if data else pd.DataFrame()
 
-def analyze_micro_markets(team: str, opp: str, frames: dict) -> dict:
-    res = {"status": "ok", "diagnostic": ""}
-    freq_df = frames.get("frequency", pd.DataFrame())
-    foul_df = frames.get("fouls", pd.DataFrame())
-    acc_df = frames.get("accuracy", pd.DataFrame())
+def analyze_micro_markets(t_off: str, t_def: str, frames: dict) -> pd.DataFrame:
+    data = []
     
-    if freq_df.empty and foul_df.empty and acc_df.empty:
-        res["status"] = "missing"
-        return res
+    def _get_metric(t_name, df_keys, cols, agg='mean'):
+        for k in df_keys:
+            df = frames.get(k, pd.DataFrame())
+            if df.empty: continue
+            tc, c = _col(df, ["team", "tm", "franchise"]), _col(df, cols)
+            if not c: continue
+            
+            tdf = df[df[tc].astype(str).str.lower().str.contains(t_name.lower(), na=False)] if tc else df
+            if tdf.empty: continue
+            
+            if _col(tdf, ["player", "name"]):
+                min_col = _col(tdf, ["min", "mpg", "mp"])
+                if min_col: tdf = tdf.sort_values(by=min_col, ascending=False).head(8)
+                v = pd.to_numeric(tdf[c], errors='coerce').dropna()
+                if not v.empty: return v.sum() if agg == 'sum' else v.mean()
+            else:
+                return pd.to_numeric(tdf[c].iloc[0], errors='coerce')
+        return np.nan
+
+    # 1. Tiros Libres y Faltas (SFLD = Shooting Fouls Drawn)
+    o_sfld = _get_metric(t_off, ["fouls", "players"], ["sfld", "fta", "ft"], agg='sum')
+    if not np.isnan(o_sfld):
+        sig = "🟢 OVER FALTAS / LIBRES (Ataque muy agresivo)" if o_sfld > 12 else "🔴 UNDER FALTAS (Ataque pasivo)"
+        data.append({"Mercado": "Faltas Recibidas (Shooting Fouls)", "Ofensiva": f"{o_sfld:.1f}", "Defensiva Rival": "N/D", "Señal": sig})
+
+    # 2. Ataque a la Pintura (RIM Freq)
+    o_rim = _get_metric(t_off, ["frequency", "shooting"], ["rim", "paint"], agg='mean')
+    if not np.isnan(o_rim):
+        sig = "🟢 ALTO VOLUMEN EN PINTURA" if o_rim > 30 else "🔴 ATAQUE PERIMETRAL"
+        data.append({"Mercado": "Ataque al Aro (Rim Freq %)", "Ofensiva": f"{o_rim:.1f}%", "Defensiva Rival": "N/D", "Señal": sig})
+
+    # 3. Triples
+    o_3p = _get_metric(t_off, ["nbaleaguesumary", "players", "shooting"], ["3pa", "3p_freq", "3p"], agg='mean')
+    if not np.isnan(o_3p):
+        o_val = o_3p * 100 if o_3p < 2.0 else o_3p
+        sig = "🟢 LÍNEA DE TRIPLES ALTA" if o_val > 35 else "🔴 LÍNEA DE TRIPLES BAJA"
+        data.append({"Mercado": "Volumen de Triples (3PA / 3P%)", "Ofensiva": f"{o_val:.1f}", "Defensiva Rival": "N/D", "Señal": sig})
+
+    if not data:
+        data.append({"Mercado": "Faltan Columnas", "Ofensiva": "-", "Defensiva Rival": "-", "Señal": "⚪ Sube los archivos para calcular"})
         
-    res["diagnostic"] = f"FREQ: {list(freq_df.columns)[:8]} | FOULS: {list(foul_df.columns)[:8]} | ACCURACY: {list(acc_df.columns)[:8]}"
-    return res
+    return pd.DataFrame(data)
     with st.sidebar:
     st.title("NBA PROPS & HUNTER")
     uploaded = st.file_uploader("Sube archivos CTG y NBA", accept_multiple_files=True, type=["csv", "xlsx"])
@@ -221,15 +255,22 @@ with c1: t_home = st.selectbox("Local", teams)
 with c2: t_away = st.selectbox("Visitante", teams, index=1 if len(teams)>1 else 0)
 
 st.sidebar.divider()
-st.sidebar.subheader("🚑 Bajas")
+st.sidebar.subheader("🚑 Bajas Oficiales")
 
-def get_team_roster(team: str) -> list:
-    df = frames.get("roster", pd.DataFrame())
-    c, p = _col(df, ["team", "tm"]), _col(df, ["player", "name"])
-    return df[df[c] == team][p].dropna().unique().tolist() if not df.empty and c and p else []
+# SOLUCIÓN DE BAJAS: BUSCADOR GLOBAL EN TODA LA BASE DE DATOS
+def get_global_roster(frames: dict) -> list:
+    players = set()
+    for key in ["roster", "players", "fouls", "frequency"]:
+        df = frames.get(key, pd.DataFrame())
+        if not df.empty:
+            p_col = _col(df, ["player", "name", "jugador"])
+            if p_col:
+                players.update(df[p_col].dropna().astype(str).unique().tolist())
+    return sorted(list(players))
 
-out_home = st.sidebar.multiselect(f"Bajas {t_home}", get_team_roster(t_home))
-out_away = st.sidebar.multiselect(f"Bajas {t_away}", get_team_roster(t_away))
+roster_list = get_global_roster(frames)
+out_home = st.sidebar.multiselect(f"Selecciona las Bajas de {t_home}", roster_list)
+out_away = st.sidebar.multiselect(f"Selecciona las Bajas de {t_away}", roster_list)
 
 tab1, tab2, tab3 = st.tabs(["🎯 Game Hunter", "💥 Prop Assassin", "🎲 Micro-Mercados"])
 
@@ -258,19 +299,14 @@ with tab2:
         df_props = generate_roster_matrix(t_target, t_opp, frames, current_out)
         if df_props.empty: 
             st.warning("Matriz vacía: Faltan promedios tradicionales (PTS, TRB, AST).")
-            st.info("💡 Diagnóstico: Revisa que subiste el archivo de Basketball-Reference.")
-            st.code(list(frames.get("players", pd.DataFrame()).columns)[:15])
         else: st.dataframe(df_props, use_container_width=True, hide_index=True)
 
 with tab3:
-    st.subheader("Matchup Táctico: Faltas, Triples, Precisión")
+    st.subheader("Matchup Táctico: Faltas, Triples, Pintura")
+    st.write("Agrega datos de la rotación principal (Top 8 minutos) vs Estilo Defensivo.")
+    
     t_target_micro = st.radio("Analizar Táctica de:", [t_home, t_away], horizontal=True, key="t_micro")
     
-    if st.button(f"Ejecutar Modelo para {t_target_micro}", type="primary"):
-        m_data = analyze_micro_markets(t_target_micro, t_away if t_target_micro == t_home else t_home, frames)
-        
-        if m_data["status"] == "missing":
-            st.info("👈 Sube los archivos 'Frequency', 'Foul' o 'Accuracy' de CTG.")
-        else:
-            st.warning("Archivos leídos. Envíame este texto para construir las fórmulas matemáticas exactas:")
-            st.code(m_data["diagnostic"])
+    if st.button(f"Ejecutar Modelo de {t_target_micro}", type="primary"):
+        df_micro = analyze_micro_markets(t_target_micro, t_away if t_target_micro == t_home else t_home, frames)
+        st.dataframe(df_micro, use_container_width=True, hide_index=True)
