@@ -17,8 +17,12 @@ def _col(df: pd.DataFrame, candidates: list) -> str | None:
     return next((c for c in candidates if c in df.columns), None)
 
 def _match_team(val, target, fname=""):
-    v, t = str(val).lower().strip(), str(target).lower().strip()
-    if v == t or v in t or t in v or t in fname.lower(): return True
+    v, t, f = str(val).lower().strip(), str(target).lower().strip(), fname.lower()
+    # Prioridad 1: Nombre del equipo en la celda
+    if v == t or v in t or t in v: return True
+    # Prioridad 2: Nombre del equipo en el nombre del archivo
+    if t in f: return True
+    # Prioridad 3: Diccionario de abreviaturas
     d = {"sas":"san antonio", "den":"denver", "bos":"boston", "gsw":"golden", "lal":"lakers", "lac":"clipper", "nyk":"new york", "okc":"oklahoma", "phx":"phoenix", "nop":"new orleans", "min":"minnesota", "sac":"sacramento", "dal":"dallas", "mia":"miami", "mem":"memphis", "orl":"orlando", "phi":"philadelphia", "tor":"toronto", "chi":"chicago", "cle":"cleveland", "det":"detroit", "ind":"indiana", "mil":"milwaukee", "atl":"atlanta", "cha":"charlotte", "was":"washington", "uta":"utah", "por":"portland", "hou":"houston", "bkn":"brooklyn"}
     if v in d and d[v] in t: return True
     if t in d and d[t] in v: return True
@@ -43,7 +47,7 @@ def load_data(files_bytes: dict) -> dict:
         if v:
             res = pd.concat(v, ignore_index=True)
             p_col = _col(res, ["player", "name"])
-            if p_col: res = res.drop_duplicates(subset=[p_col])
+            if p_col: res = res.drop_duplicates(subset=[p_col, "_source_file"])
             frames[k] = res
         else: frames[k] = pd.DataFrame()
     return frames
@@ -88,10 +92,12 @@ def project_game(home: str, away: str, frames: dict, h_imp: float, a_imp: float)
     return {"home_pts": h_pts, "away_pts": a_pts, "total": tot, "winner": winner, "margin": abs(h_pts - a_pts)}
 
 def generate_roster_matrix(team: str, frames: dict, out_players: list) -> pd.DataFrame:
+    # FILTRO DE EQUIPO ESTRICTO (Para evitar mezcla Jokic/Wemby)
     rdf = frames.get("roster", pd.DataFrame())
     if rdf.empty: rdf = frames.get("players", pd.DataFrame())
     tc, nc = _col(rdf, ["team", "tm"]), _col(rdf, ["player", "name"])
     if rdf.empty or not nc: return pd.DataFrame()
+    # Solo jugadores que pertenezcan al equipo target (por celda o por nombre de archivo)
     roster = rdf[rdf.apply(lambda r: _match_team(r[tc], team, r.get("_source_file", "")), axis=1)] if tc else rdf
     data = []
     for _, row in roster.iterrows():
@@ -105,18 +111,23 @@ def generate_roster_matrix(team: str, frames: dict, out_players: list) -> pd.Dat
     return pd.DataFrame(data).sort_values(by="Proj PTS", ascending=False) if data else pd.DataFrame()
 
 def analyze_team_tactics(team: str, frames: dict):
-    res = {"SFLD (Faltas)": "-", "RIM (Pintura)": "-", "3PA (Triples)": "-"}
+    res = {"Faltas (SFLD)": "-", "Pintura (RIM)": "-", "Triples (3PA)": "-"}
     def _get(cat, cols):
         df = frames.get(cat, pd.DataFrame())
         if df.empty: return np.nan
         tc, c = _col(df, ["team", "tm", "franchise"]), _col(df, cols)
         if not (tc and c): return np.nan
-        val = df[df.apply(lambda r: _match_team(r[tc], team, r.get("_source_file", "")), axis=1)][c]
-        return pd.to_numeric(val, errors='coerce').mean() if not val.empty else np.nan
-    s, r, t = _get("fouls", ["sfld", "fta"]), _get("frequency", ["rim", "paint"]), _get("nbaleaguesumary", ["3pa", "3p_freq"])
-    if not np.isnan(s): res["SFLD (Faltas)"] = round(s, 1)
-    if not np.isnan(r): res["RIM (Pintura)"] = f"{round(r, 1)}%"
-    if not np.isnan(t): res["3PA (Triples)"] = round(t, 1)
+        # Filtro de equipo para micro-mercados
+        tdf = df[df.apply(lambda r: _match_team(r[tc], team, r.get("_source_file", "")), axis=1)]
+        return pd.to_numeric(tdf[c], errors='coerce').mean() if not tdf.empty else np.nan
+    
+    s = _get("fouls", ["sfld", "fta", "ft_rate"])
+    r = _get("frequency", ["rim", "paint", "rim_freq"])
+    t = _get("nbaleaguesumary", ["3pa", "3p_freq", "three_point_rate"])
+    
+    if not np.isnan(s): res["Faltas (SFLD)"] = round(s, 1)
+    if not np.isnan(r): res["Pintura (RIM)"] = f"{round(r, 1)}%"
+    if not np.isnan(t): res["Triples (3PA)"] = round(t, 1)
     return res
 
 with st.sidebar:
@@ -124,7 +135,7 @@ with st.sidebar:
     uploaded = st.file_uploader("Sube archivos", accept_multiple_files=True)
     if uploaded:
         frames = load_data({str(i): (f.name, f.read()) for i, f in enumerate(uploaded)})
-        st.success("¡Archivos Listos!")
+        st.success("¡Fusionado!")
         for k, v in frames.items(): st.write(f"✅ {k.upper()} ({len(v)})" if not v.empty else f"❌ {k.upper()} (0)")
     else: frames = {}
 
@@ -138,9 +149,20 @@ c1, c2 = st.columns(2)
 t_home = c1.selectbox("Local", teams)
 t_away = c2.selectbox("Visitante", teams, index=1 if len(teams)>1 else 0)
 
-all_p = sorted(list(set([p for k in ["players", "roster"] if not (df := frames.get(k, pd.DataFrame())).empty and (c := _col(df, ["player", "name"])) for p in df[c].dropna().unique()])))
-out_h = st.sidebar.multiselect(f"Bajas {t_home}", all_p)
-out_a = st.sidebar.multiselect(f"Bajas {t_away}", all_p)
+# Jugadores únicos por equipo para las bajas
+def get_team_players(frames, team):
+    p = set()
+    for k in ["players", "roster"]:
+        df = frames.get(k, pd.DataFrame())
+        if not df.empty:
+            tc, nc = _col(df, ["team", "tm"]), _col(df, ["player", "name"])
+            if tc and nc:
+                tdf = df[df.apply(lambda r: _match_team(r[tc], team, r.get("_source_file", "")), axis=1)]
+                p.update(tdf[nc].dropna().unique().tolist())
+    return sorted(list(p))
+
+out_h = st.sidebar.multiselect(f"Bajas {t_home}", get_team_players(frames, t_home))
+out_a = st.sidebar.multiselect(f"Bajas {t_away}", get_team_players(frames, t_away))
 
 t1, t2, t3 = st.tabs(["🎯 Hunter", "💥 Props", "🎲 Micro"])
 with t1:
