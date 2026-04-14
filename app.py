@@ -67,7 +67,7 @@ def generate_roster(team, frames, out_p):
     data = []
     for _, r in tdf.iterrows():
         name = str(r[nc])
-        if name in out_p or name == "nan": continue
+        if name in out_p or name == "nan" or name == "None": continue
         pts = pd.to_numeric(r.get("pts", 0), errors='coerce')
         if pts > 0:
             data.append({"Jugador": name, "Floor": round(pts*0.75, 1), "Proj PTS": round(pts, 1), "REB": r.get("trb", 0), "AST": r.get("ast", 0)})
@@ -94,7 +94,7 @@ with st.sidebar:
 if not frames: st.stop()
 sum_df = frames.get("nbaleaguesumary", pd.DataFrame())
 t_col = _col(sum_df, ["team", "tm"])
-teams = sorted(list(sum_df[t_col].unique())) if not sum_df.empty else ["Carga Summary"]
+teams = sorted(list(sum_df[t_col].astype(str).unique())) if not sum_df.empty else ["Carga Summary"]
 
 c1, c2 = st.columns(2)
 t_h, t_a = c1.selectbox("Local", teams, 0), c2.selectbox("Visita", teams, 1 if len(teams)>1 else 0)
@@ -106,8 +106,12 @@ def get_p_list(f, t):
         nc, tc = _col(df, ["player", "name"]), _col(df, ["team", "tm"])
         if not df.empty and nc:
             tdf = df[df.apply(lambda r: _is_team(r[tc] if tc else "", t, r["_file"]), axis=1)]
-            players.update(tdf[nc].astype(str).tolist())
-    return sorted([p for p in players if p != "nan"])
+            # Convertimos explícitamente a string y filtramos basura
+            vals = tdf[nc].dropna().astype(str).tolist()
+            players.update(vals)
+    # Filtro final antes de ordenar
+    final = [p for p in players if p.lower() not in ["nan", "none", "player", "name", ""]]
+    return sorted(final)
 
 out_h = st.sidebar.multiselect(f"Bajas {t_h}", get_p_list(frames, t_h))
 out_a = st.sidebar.multiselect(f"Bajas {t_a}", get_p_list(frames, t_a))
