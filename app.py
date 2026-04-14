@@ -37,7 +37,6 @@ def load_data(files_bytes: dict) -> dict:
             try:
                 df = pd.read_excel(io.BytesIO(raw)) if fname.endswith((".xlsx", ".xls")) else pd.read_csv(io.BytesIO(raw), encoding="latin-1")
                 df = _normalize_cols(df)
-                # Inyección forzada de equipo basada en nombre de archivo para archivos REF
                 if "team" not in df.columns and "tm" not in df.columns:
                     for k_abr, full_n in {"sas":"san antonio", "den":"denver", "sanantonio":"san antonio"}.items():
                         if k_abr in fname: df["team"] = full_n
@@ -47,7 +46,6 @@ def load_data(files_bytes: dict) -> dict:
     for k, v in temp_dict.items():
         if v:
             res = pd.concat(v, ignore_index=True)
-            # Limpieza de duplicados por nombre de jugador si existe la columna
             p_col = _col(res, ["player", "name"])
             if p_col: res = res.drop_duplicates(subset=[p_col])
             frames[k] = res
@@ -60,7 +58,6 @@ def calculate_absence_impact(team: str, out_pl: list, imp_df: pd.DataFrame) -> f
     if not (p_col and d_col): return 0.0
     tot = 0.0
     for p in out_pl:
-        # Busqueda exacta para evitar errores con nombres cortos
         v = imp_df[imp_df[p_col].astype(str) == p][d_col]
         if not v.empty:
             val = pd.to_numeric(v.iloc[0], errors='coerce')
@@ -87,31 +84,22 @@ def project_game(home: str, away: str, frames: dict, h_imp: float, a_imp: float)
     pace = np.nanmean([hm.get("pace", np.nan), am.get("pace", np.nan)])
     if np.isnan(pace): pace = 98.5
     ho, hd, ao, ad = hm.get("offrtg", np.nan), hm.get("defrtg", np.nan), am.get("offrtg", np.nan), am.get("defrtg", np.nan)
-    # Aplicación agresiva del impacto de bajas
-    ho_adj = ho + (h_imp) if not np.isnan(ho) else np.nan
-    ao_adj = ao + (a_imp) if not np.isnan(ao) else np.nan
+    ho_adj = ho + h_imp if not np.isnan(ho) else np.nan
+    ao_adj = ao + a_imp if not np.isnan(ao) else np.nan
     h_pts = np.nanmean([ho_adj, ad]) * (pace/100) if not np.isnan(ho_adj) else np.nan
     a_pts = np.nanmean([ao_adj, hd]) * (pace/100) if not np.isnan(ao_adj) else np.nan
     if not np.isnan(h_pts): h_pts += 1.5
     tot, winner = h_pts + a_pts, home if (not np.isnan(h_pts) and not np.isnan(a_pts) and h_pts > a_pts) else away
     return {"home_pts": h_pts, "away_pts": a_pts, "total": tot, "winner": winner, "margin": abs(h_pts - a_pts)}
 
-def _player_metrics(pdf: pd.DataFrame, idf: pd.DataFrame, player: str) -> dict:
-    res = {"pts": 0.0, "trb": 0.0, "ast": 0.0, "stl": 0.0, "blk": 0.0, "orb": 0.0, "drb": 0.0, "usg": np.nan, "mp": 0.0}
-    if pdf.empty: return res
-    nc = _col(pdf, ["player", "name"])
-    if nc:
-        p1 = pdf[pdf[nc].astype(str) == player].copy()
-        if p1.empty: p1 = pdf[pdf[nc].astype(str).str.contains(player, na=False)].copy()
-        for m in ["pts", "trb", "ast", "stl", "blk", "orb", "drb", "mp"]:
-            if m in p1.columns: res[m] = pd.to_numeric(p1[m], errors="coerce").mean()
-    if not idf.empty:
-        nic = _col(idf, ["player", "name"])
-        if nic:
-            i1 = idf[idf[nic].astype(str) == player]
-            c_usg = _col(i1, ["usage", "usg"])
-            if c_usg: res["usg"] = pd.to_numeric(i1[c_usg], errors="coerce").mean()
-    return res
+def get_player_list(frames):
+    p_list = []
+    for k in ["players", "roster"]:
+        df = frames.get(k, pd.DataFrame())
+        if not df.empty:
+            c = _col(df, ["player", "name"])
+            if c: p_list.extend(df[c].dropna().unique().tolist())
+    return sorted(list(set(p_list)))
 
 def generate_roster_matrix(team: str, opp: str, frames: dict, out_players: list) -> pd.DataFrame:
     rdf = frames.get("roster", pd.DataFrame())
@@ -123,9 +111,15 @@ def generate_roster_matrix(team: str, opp: str, frames: dict, out_players: list)
     for _, row in roster.iterrows():
         pname = str(row[nc])
         if pname in out_players: continue
-        m = _player_metrics(frames.get("players", pd.DataFrame()), frames.get("impact", pd.DataFrame()), pname)
-        if m["pts"] == 0 and m["trb"] == 0: continue
-        data.append({"Jugador": pname, "Floor Safe": round(m["pts"] * 0.7, 1), "Proj PTS": round(m["pts"], 1), "TRB": round(m["trb"], 1), "AST": round(m["ast"], 1), "STL/BLK": f"{round(m['stl'],1)}/{round(m['blk'],1)}", "ORB": round(m["orb"], 1), "MP": round(m["mp"], 1)})
+        p_df = frames.get("players", pd.DataFrame())
+        p_nc = _col(p_df, ["player", "name"])
+        res = {"pts": 0.0, "trb": 0.0, "ast": 0.0, "stl": 0.0, "blk": 0.0, "orb": 0.0, "mp": 0.0}
+        if not p_df.empty and p_nc:
+            p1 = p_df[p_df[p_nc].astype(str) == pname]
+            for m in res.keys():
+                if m in p1.columns: res[m] = pd.to_numeric(p1[m], errors="coerce").mean()
+        if res["pts"] == 0 and res["trb"] == 0: continue
+        data.append({"Jugador": pname, "Floor Safe": round(res["pts"] * 0.7, 1), "Proj PTS": round(res["pts"], 1), "TRB": round(res["trb"], 1), "AST": round(res["ast"], 1), "STL/BLK": f"{round(res['stl'],1)}/{round(res['blk'],1)}", "ORB": round(res['orb'], 1), "MP": round(res['mp'], 1)})
     return pd.DataFrame(data).sort_values(by="Proj PTS", ascending=False) if data else pd.DataFrame()
 
 def analyze_team_tactics(team: str, frames: dict):
@@ -154,12 +148,15 @@ with st.sidebar:
 
 if not frames: st.stop()
 
-teams = sorted(list(set(frames.get("nbaleaguesumary", pd.DataFrame())[_col(frames.get("nbaleaguesumary"), ["team", "tm"])].dropna().unique())))
+summary_df = frames.get("nbaleaguesumary", pd.DataFrame())
+team_col = _col(summary_df, ["team", "tm"])
+teams = sorted(list(summary_df[team_col].dropna().unique())) if team_col else ["Carga League Summary"]
+
 c1, c2 = st.columns(2)
 t_home = c1.selectbox("Local", teams)
 t_away = c2.selectbox("Visitante", teams, index=1 if len(teams)>1 else 0)
 
-all_p = sorted(list(set(get_unique_players := lambda f: [p for k in ["players", "roster"] if not (df := f.get(k, pd.DataFrame())).empty and (c := _col(df, ["player", "name"])) for p in df[c].dropna().unique()](frames))))
+all_p = get_player_list(frames)
 out_h = st.sidebar.multiselect(f"Bajas {t_home}", all_p)
 out_a = st.sidebar.multiselect(f"Bajas {t_away}", all_p)
 
