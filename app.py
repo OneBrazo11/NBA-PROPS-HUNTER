@@ -60,7 +60,8 @@ def _team_momentum(sdf: pd.DataFrame, team: str) -> dict:
     return res
 
 def project_game(home: str, away: str, frames: dict, h_imp: float, a_imp: float) -> dict:
-    hm, am = _team_momentum(frames.get("nbaleaguesumary", pd.DataFrame()), home), _team_momentum(frames.get("nbaleaguesumary", pd.DataFrame()), away)
+    hm = _team_momentum(frames.get("nbaleaguesumary", pd.DataFrame()), home)
+    am = _team_momentum(frames.get("nbaleaguesumary", pd.DataFrame()), away)
     pace = np.nanmean([hm.get("pace", np.nan), am.get("pace", np.nan)])
     if np.isnan(pace): pace = 98.5
     ho, hd = hm.get("offrtg", np.nan), hm.get("defrtg", np.nan)
@@ -110,4 +111,73 @@ def _dvp_factor(def_df: pd.DataFrame, opp: str, pos: str) -> float:
     if not tc: return 1.0
     t_df = def_df[def_df[tc].astype(str).str.lower().str.contains(opp.lower(), na=False)]
     if pc and not t_df.empty:
-        p
+        p_df = t_df[t_df[pc].astype(str).str.lower().str.contains(str(pos).lower()[:2], na=False)]
+        if not p_df.empty: t_df = p_df
+    rc = _col(t_df, ["rel", "diff", "vs_avg", "pct_diff"])
+    if rc and not t_df.empty:
+        val = pd.to_numeric(t_df[rc], errors="coerce").mean()
+        if not np.isnan(val): return 1.0 + (val / 100.0)
+    return 1.0
+
+def evaluate_risk(dvp: float, usg: float, mins: float) -> tuple:
+    s_dvp = 3 if dvp > 1.05 else (1 if dvp < 0.95 else 2)
+    t_dvp = "🟢 Favorable" if dvp > 1.05 else ("🔴 Difícil" if dvp < 0.95 else "🟡 Neutro")
+    s_vol, t_vol = 2, "🟡 Rotación"
+    if not np.isnan(usg):
+        s_vol = 3 if usg > 22.0 else (1 if usg < 15.0 else 2)
+        t_vol = "🟢 Foco Ofensivo" if usg > 22.0 else ("🔴 Bajo Uso" if usg < 15.0 else "🟡 Rotación")
+    elif not np.isnan(mins):
+        s_vol = 3 if mins > 28.0 else (1 if mins < 18.0 else 2)
+        t_vol = "🟢 Titular Fijo" if mins > 28.0 else ("🔴 Pocos Minutos" if mins < 18.0 else "🟡 Rotación")
+    tot = s_dvp + s_vol
+    risk = "🟢 ALTÍSIMA PROB." if tot == 6 else ("🟢 ALTA PROB." if tot == 5 else ("🟡 PROB. MEDIA" if tot == 4 else "🔴 ALTO RIESGO"))
+    return t_dvp, t_vol, risk
+
+def generate_roster_matrix(team: str, opp: str, frames: dict, out_players: list) -> pd.DataFrame:
+    rdf = frames.get("roster", pd.DataFrame())
+    if rdf.empty: rdf = frames.get("players", pd.DataFrame())
+    tc, nc, pc = _col(rdf, ["team", "tm"]), _col(rdf, ["player", "name"]), _col(rdf, ["pos", "position"])
+    if rdf.empty or not nc: return pd.DataFrame()
+    roster = rdf[rdf[tc].astype(str).str.lower().str.contains(team.lower(), na=False)] if tc else rdf
+    data = []
+    for _, row in roster.iterrows():
+        pname = str(row[nc])
+        if pname in out_players: continue
+        pos = str(row[pc]) if pc else "UNKN"
+        m = _player_metrics(frames.get("players", pd.DataFrame()), frames.get("impact", pd.DataFrame()), pname)
+        pts_val = m.get("pts", np.nan)
+        if np.isnan(pts_val): continue
+        reb_val, ast_val = m.get("reb", 0.0), m.get("ast", 0.0)
+        usg_val, min_val = m.get("usg", np.nan), m.get("min", np.nan)
+        dvp = _dvp_factor(frames.get("def", pd.DataFrame()), opp, pos)
+        t_dvp, t_vol, risk = evaluate_risk(dvp, usg_val, min_val)
+        data.append({"Jugador": pname, "Pos": pos, "PTS": round(pts_val * dvp, 1), "REB": round(reb_val * dvp, 1), "AST": round(ast_val * dvp, 1), "PRA": round((pts_val + reb_val + ast_val) * dvp, 1), "1. Matchup (DVP)": t_dvp, "2. Volumen": t_vol, "3. RIESGO": risk})
+    return pd.DataFrame(data).sort_values(by="PTS", ascending=False) if data else pd.DataFrame()
+
+def analyze_micro_markets(t_off: str, t_def: str, frames: dict) -> pd.DataFrame:
+    data = []
+    def _get_metric(t_name, df_keys, cols, agg='mean'):
+        for k in df_keys:
+            df = frames.get(k, pd.DataFrame())
+            if df.empty: continue
+            tc, c = _col(df, ["team", "tm", "franchise"]), _col(df, cols)
+            if not c: continue
+            tdf = df[df[tc].astype(str).str.lower().str.contains(t_name.lower(), na=False)] if tc else df
+            if tdf.empty: continue
+            if _col(tdf, ["player", "name"]):
+                min_col = _col(tdf, ["min", "mpg", "mp"])
+                if min_col: tdf = tdf.sort_values(by=min_col, ascending=False).head(8)
+                v = pd.to_numeric(tdf[c], errors='coerce').dropna()
+                if not v.empty: return v.sum() if agg == 'sum' else v.mean()
+            else:
+                return pd.to_numeric(tdf[c].iloc[0], errors='coerce')
+        return np.nan
+    o_sfld = _get_metric(t_off, ["fouls", "players"], ["sfld", "fta", "ft"], agg='sum')
+    if not np.isnan(o_sfld):
+        sig = "🟢 OVER FALTAS (Ataque agresivo)" if o_sfld > 12 else "🔴 UNDER FALTAS (Ataque pasivo)"
+        data.append({"Mercado": "Faltas Recibidas (SFLD)", "Ofensiva": f"{o_sfld:.1f}", "Defensiva Rival": "N/D", "Señal": sig})
+    o_rim = _get_metric(t_off, ["frequency", "shooting"], ["rim", "paint"], agg='mean')
+    if not np.isnan(o_rim):
+        sig = "🟢 ALTO VOLUMEN EN PINTURA" if o_rim > 30 else "🔴 ATAQUE PERIMETRAL"
+        data.append({"Mercado": "Ataque al Aro (Rim Freq %)", "Ofensiva": f"{o_rim:.1f}%", "Defensiva Rival": "N/D", "Señal": sig})
+    o_3p = _get_metric(t_off, ["nbaleaguesum
