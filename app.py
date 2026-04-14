@@ -3,6 +3,17 @@ import pandas as pd
 import numpy as np
 import io
 
+# --- BLOQUE DE SEGURIDAD ---
+def check_password():
+    if "password_correct" not in st.session_state:
+        st.text_input("Introduce la clave de acceso", type="password", on_change=lambda: st.session_state.update({"password_correct": st.session_state.password_input == st.secrets["password"]}), key="password_input")
+        return False
+    return st.session_state["password_correct"]
+
+if not check_password():
+    st.stop()
+# --- FIN BLOQUE DE SEGURIDAD ---
+
 st.set_page_config(page_title="NBA PROPS & HUNTER", page_icon="🏀", layout="wide")
 
 def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
