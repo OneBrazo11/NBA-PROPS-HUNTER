@@ -36,8 +36,7 @@ def load_data(files_bytes: dict) -> dict:
             try:
                 df = pd.read_excel(io.BytesIO(raw)) if fname.endswith((".xlsx", ".xls")) else pd.read_csv(io.BytesIO(raw), encoding="latin-1")
                 df = _normalize_cols(df)
-                # Si el archivo es un REF y no tiene columna TEAM, la creamos basada en el nombre del archivo
-                if "ref" in fname and "team" not in df.columns and "tm" not in df.columns:
+                if ("ref" in fname or "roster" in fname) and "team" not in df.columns and "tm" not in df.columns:
                     df["team"] = fname.split("_")[0]
                 temp_dict[match].append(df)
             except: pass
@@ -66,9 +65,7 @@ def _team_momentum(sdf: pd.DataFrame, team: str) -> dict:
     l10 = _col(tdf, ["split", "last_n", "games"])
     if l10 and tdf[l10].astype(str).str.lower().str.contains("l10|last", regex=True, na=False).any():
         tdf = tdf[tdf[l10].astype(str).str.lower().str.contains("l10|last", regex=True, na=False)]
-    oc = _col(tdf, ["last_2_weeks_offense", "offense", "offrtg", "ortg", "pts_per_100"])
-    dc = _col(tdf, ["last_2_weeks_defense", "defense", "defrtg", "drtg", "opp_pts_per_100"])
-    pc = _col(tdf, ["pace", "poss", "ritmo"])
+    oc, dc, pc = _col(tdf, ["last_2_weeks_offense", "offense", "offrtg", "ortg"]), _col(tdf, ["last_2_weeks_defense", "defense", "defrtg", "drtg"]), _col(tdf, ["pace", "poss"])
     if oc: res["offrtg"] = pd.to_numeric(tdf[oc], errors="coerce").mean()
     if dc: res["defrtg"] = pd.to_numeric(tdf[dc], errors="coerce").mean()
     if pc: res["pace"] = pd.to_numeric(tdf[pc], errors="coerce").mean()
@@ -87,10 +84,8 @@ def project_game(home: str, away: str, frames: dict, h_imp: float, a_imp: float)
     a_pts = np.nanmean([ao_adj, hd_adj]) * (pace/100) if not np.isnan(ao_adj) else np.nan
     if not np.isnan(h_pts): h_pts += 1.5
     if not np.isnan(a_pts): a_pts -= 1.5
-    tot, spread = h_pts + a_pts, a_pts - h_pts
-    winner = home if (not np.isnan(h_pts) and not np.isnan(a_pts) and h_pts > a_pts) else away
-    margin = abs(h_pts - a_pts) if (not np.isnan(h_pts) and not np.isnan(a_pts)) else 0.0
-    return {"home_pts": h_pts, "away_pts": a_pts, "total": tot, "spread": spread, "winner": winner, "margin": margin}
+    tot, winner = h_pts + a_pts, home if (not np.isnan(h_pts) and not np.isnan(a_pts) and h_pts > a_pts) else away
+    return {"home_pts": h_pts, "away_pts": a_pts, "total": tot, "winner": winner, "margin": abs(h_pts - a_pts)}
 
 def _player_metrics(pdf: pd.DataFrame, idf: pd.DataFrame, player: str) -> dict:
     res = {"pts": 0.0, "trb": 0.0, "ast": 0.0, "stl": 0.0, "blk": 0.0, "orb": 0.0, "drb": 0.0, "usg": np.nan, "mp": 0.0}
@@ -120,20 +115,12 @@ def generate_roster_matrix(team: str, opp: str, frames: dict, out_players: list)
         if pname in out_players: continue
         m = _player_metrics(frames.get("players", pd.DataFrame()), frames.get("impact", pd.DataFrame()), pname)
         if m["pts"] == 0 and m["trb"] == 0: continue
-        dvp = 1.0 # Simplificado para velocidad
-        pts_p = m["pts"] * dvp
-        data.append({
-            "Jugador": pname,
-            "Floor Safe": round(pts_p * 0.75, 1), # Línea mínima segura
-            "Proj PTS": round(pts_p, 1),
-            "TRB": round(m["trb"], 1), "AST": round(m["ast"], 1),
-            "STL/BLK": f"{round(m['stl'],1)}/{round(m['blk'],1)}",
-            "ORB": round(m["orb"], 1), "MP": round(m["mp"], 1)
-        })
+        pts_p = m["pts"]
+        data.append({"Jugador": pname, "Floor Safe": round(pts_p * 0.75, 1), "Proj PTS": round(pts_p, 1), "TRB": round(m["trb"], 1), "AST": round(m["ast"], 1), "STL/BLK": f"{round(m['stl'],1)}/{round(m['blk'],1)}", "ORB": round(m["orb"], 1), "MP": round(m["mp"], 1)})
     return pd.DataFrame(data).sort_values(by="Proj PTS", ascending=False) if data else pd.DataFrame()
 
 def analyze_team_tactics(team: str, frames: dict):
-    data = []
+    res = {"SFLD (Faltas)": "-", "RIM (Pintura)": "-", "3PA (Triples)": "-"}
     def _get(cat, cols):
         df = frames.get(cat, pd.DataFrame())
         if df.empty: return np.nan
@@ -141,31 +128,31 @@ def analyze_team_tactics(team: str, frames: dict):
         if not (tc and c): return np.nan
         val = df[df[tc].apply(lambda x: _match_team(x, team))][c]
         return pd.to_numeric(val, errors='coerce').mean() if not val.empty else np.nan
-
-    sfld = _get("fouls", ["sfld", "fta"])
-    rim = _get("frequency", ["rim", "paint"])
-    tp = _get("nbaleaguesumary", ["3pa", "3p_freq"])
-    
-    return {"SFLD (Faltas)": round(sfld,1), "RIM (Pintura)": f"{round(rim,1)}%", "3PA (Triples)": round(tp,1)}
+    s, r, t = _get("fouls", ["sfld", "fta"]), _get("frequency", ["rim", "paint"]), _get("nbaleaguesumary", ["3pa", "3p_freq"])
+    if not np.isnan(s): res["SFLD (Faltas)"] = round(s, 1)
+    if not np.isnan(r): res["RIM (Pintura)"] = f"{round(r, 1)}%"
+    if not np.isnan(t): res["3PA (Triples)"] = round(t, 1)
+    return res
 
 with st.sidebar:
     st.title("NBA PROPS & HUNTER")
     uploaded = st.file_uploader("Sube archivos", accept_multiple_files=True)
     if uploaded:
         frames = load_data({str(i): (f.name, f.read()) for i, f in enumerate(uploaded)})
-        st.success("Fusionado")
+        st.success("¡Fusionado!")
+        for k, v in frames.items(): st.write(f"✅ {k.upper()} ({len(v)})" if not v.empty else f"❌ {k.upper()} (0)")
     else: frames = {}
 
 if not frames: st.stop()
 
 teams = sorted(list(set(frames.get("nbaleaguesumary", pd.DataFrame())[_col(frames.get("nbaleaguesumary"), ["team", "tm"])].dropna().unique())))
-t_home = st.columns(2)[0].selectbox("Local", teams)
-t_away = st.columns(2)[1].selectbox("Visitante", teams, index=1 if len(teams)>1 else 0)
+c1, c2 = st.columns(2)
+t_home = c1.selectbox("Local", teams)
+t_away = c2.selectbox("Visitante", teams, index=1 if len(teams)>1 else 0)
 
-# BAJAS SIN DUPLICADOS
 def get_unique_players(frames):
     p = set()
-    for k in ["roster", "players"]:
+    for k in ["roster", "players", "impact"]:
         df = frames.get(k, pd.DataFrame())
         c = _col(df, ["player", "name"])
         if c: p.update(df[c].dropna().unique().tolist())
@@ -176,22 +163,19 @@ out_h = st.sidebar.multiselect(f"Bajas {t_home}", all_p)
 out_a = st.sidebar.multiselect(f"Bajas {t_away}", all_p)
 
 t1, t2, t3 = st.tabs(["🎯 Hunter", "💥 Props", "🎲 Micro"])
-
 with t1:
-    if st.button("Proyectar"):
+    if st.button("Proyectar Game"):
         imp = frames.get("impact", pd.DataFrame())
         g = project_game(t_home, t_away, frames, calculate_absence_impact(t_home, out_h, imp), calculate_absence_impact(t_away, out_a, imp))
         st.metric(f"Ganador: {g['winner']}", f"{g['home_pts']:.1f} - {g['away_pts']:.1f}", f"Total: {g['total']:.1f}")
-
 with t2:
-    st.subheader(f"Props Proyectados: {t_home}")
+    st.subheader(f"Props: {t_home}")
     st.dataframe(generate_roster_matrix(t_home, t_away, frames, out_h), use_container_width=True)
-    st.subheader(f"Props Proyectados: {t_away}")
+    st.subheader(f"Props: {t_away}")
     st.dataframe(generate_roster_matrix(t_away, t_home, frames, out_a), use_container_width=True)
-
 with t3:
     c1, c2 = st.columns(2)
-    c1.write(f"📊 Táctica {t_home}")
-    c1.json(analyze_team_tactics(t_home, frames))
-    c2.write(f"📊 Táctica {t_away}")
-    c2.json(analyze_team_tactics(t_away, frames))
+    c1.subheader(f"📊 {t_home}")
+    c1.table(pd.Series(analyze_team_tactics(t_home, frames)))
+    c2.subheader(f"📊 {t_away}")
+    c2.table(pd.Series(analyze_team_tactics(t_away, frames)))
